@@ -8,9 +8,12 @@ open Microsoft.Extensions.Logging
 open Snake.Engine
 open Snake.Server.Api
 
-let decide (gs: GameState) =
+/// Searches until `stopAt` (a Stopwatch timestamp). A Searcher is a few KB of buffers, so one per request is fine.
+let decide (gs: GameState) (stopAt: int64) =
     let b, me = toBoard gs
-    Policy(b.Geometry, b.MaxSnakes).Decide(b, me)
+    Searcher(b.Geometry, b.MaxSnakes).Search(b, me, stopAt)
+
+let msToTicks (ms: float) = int64 (ms * float Stopwatch.Frequency / 1000.0)
 
 /// Startup warmup: run the decision path a few hundred times on a fake board so the JIT promotes the hot paths to optimized code (tier 1).
 let warmup () =
@@ -27,8 +30,9 @@ let warmup () =
           Board = { Height = 11; Width = 11; Food = [| { X = 5; Y = 5 } |]; Hazards = [||]; Snakes = snakes }
           You = snakes.[0] }
 
+    // Many short searches: tiering promotes a method after ~30 calls, then OSR/PGO need loops to run
     let sw = Stopwatch.StartNew()
-    for _ in 1..500 do decide gs |> ignore
+    for _ in 1..60 do decide gs (Stopwatch.GetTimestamp() + msToTicks 5.0) |> ignore
     sw.Elapsed.TotalMilliseconds
 
 [<EntryPoint>]
@@ -46,12 +50,17 @@ let main args =
 
     app.MapPost("/move", Func<GameState, obj>(fun gs ->
         let t0 = Stopwatch.GetTimestamp()
-        let d = decide gs
+        let budget, net = Clock.budget gs.Game.Id gs.Game.Timeout gs.You.Latency
+        let r = decide gs (t0 + msToTicks budget)
         let ms = Stopwatch.GetElapsedTime(t0).TotalMilliseconds
-        log.LogInformation("move {game} t={turn} -> {dir} ({ms:F1} ms)", gs.Game.Id, gs.Turn, Dir.toApi d, ms)
-        box {| move = Dir.toApi d; shout = "" |})) |> ignore
+        Clock.record gs.Game.Id ms
+        log.LogInformation(
+            "move {game} t={turn} -> {dir} d={depth} score={score:F0} nodes={nodes} ({ms:F1}/{budget:F0} ms, net~{net:F0}, lat={lat})",
+            gs.Game.Id, gs.Turn, Dir.toApi r.Move, r.Depth, r.Score, r.Nodes, ms, budget, net, gs.You.Latency)
+        box {| move = Dir.toApi r.Move; shout = "" |})) |> ignore
 
     app.MapPost("/end", Func<GameState, IResult>(fun gs ->
+        Clock.finish gs.Game.Id
         let won = gs.Board.Snakes |> Array.exists (fun s -> s.Id = gs.You.Id)
         log.LogInformation("end {game} turn={turn} {result}", gs.Game.Id, gs.Turn, (if won then "WIN/ALIVE" else "LOSS"))
         Results.Ok())) |> ignore

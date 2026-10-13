@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="Board.fs" />
     <Compile Include="Search.fs" />
+    <Compile Include="Tree.fs" />
   </ItemGroup>
 
 </Project>

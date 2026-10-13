@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <Compile Include="Api.fs" />
+    <Compile Include="Clock.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/arena/">
+    <Project Path="arena/Arena/Arena.fsproj" />
+  </Folder>
   <Folder Name="/bench/">
     <Project Path="bench/Bench/Bench.fsproj" />
   </Folder>
