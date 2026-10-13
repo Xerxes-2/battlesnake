@@ -8,12 +8,12 @@ open Microsoft.Extensions.Logging
 open Snake.Engine
 open Snake.Server.Api
 
-/// Searches until `stopAt` (a Stopwatch timestamp). A Searcher is a few KB of buffers, so one per request is fine.
+/// Searches until `stopAt` (a Stopwatch timestamp) with this game's persistent Searcher.
 let decide (gs: GameState) (stopAt: int64) =
     let b, me = toBoard gs
     // Duels and multi-snake games reward different things (e.g. length matters more 1v1), so they are tuned apart
     let w = if gs.Board.Snakes.Length = 2 then Weights.Duel else Weights.Standard
-    Searcher(b.Geometry, b.MaxSnakes, w).Search(b, me, stopAt)
+    Sessions.withSearcher gs.Game.Id b w (fun s -> s.Search(b, me, stopAt))
 
 let msToTicks (ms: float) = int64 (ms * float Stopwatch.Frequency / 1000.0)
 
@@ -35,6 +35,7 @@ let warmup () =
     // Many short searches: tiering promotes a method after ~30 calls, then OSR/PGO need loops to run
     let sw = Stopwatch.StartNew()
     for _ in 1..60 do decide gs (Stopwatch.GetTimestamp() + msToTicks 5.0) |> ignore
+    Sessions.finish "warmup"
     sw.Elapsed.TotalMilliseconds
 
 [<EntryPoint>]
@@ -66,6 +67,7 @@ let main args =
 
     app.MapPost("/end", Func<GameState, IResult>(fun gs ->
         Clock.finish gs.Game.Id
+        Sessions.finish gs.Game.Id
         let won = gs.Board.Snakes |> Array.exists (fun s -> s.Id = gs.You.Id)
         log.LogInformation("end {game} turn={turn} {result}", gs.Game.Id, gs.Turn, (if won then "WIN/ALIVE" else "LOSS"))
         Results.Ok())) |> ignore

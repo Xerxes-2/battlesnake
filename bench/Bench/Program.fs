@@ -98,6 +98,8 @@ let searchBench (positions: Board[]) (ms: float) (rounds: int) =
     for _ in 1..rounds do
         for p in positions do
             let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
+            // Rounds repeat the same positions: start cold so the table cannot carry answers over
+            sr.Clear()
             let r = sr.SearchFor(p, me, ms)
             nodes <- nodes + r.Nodes
             depth <- depth + int64 r.Depth
@@ -141,16 +143,17 @@ let orderBench () =
         let ps = mixedPositions n 40
 
         for d in depths do
-            let total o =
+            let total o sc =
                 ps
                 |> Array.sumBy (fun b ->
                     let sr = Searcher(geo, n, Weights.Standard)
                     sr.Ordering <- o
+                    sr.UseScores <- sc
                     sr.MaxDepth <- d
                     (sr.SearchFor(b, 0, 600_000.0)).Nodes)
 
-            let a, b = total false, total true
-            printfn "%-9s depth %d: plain %11d  ordered %11d  (%.2fx fewer)" label d a b (float a / float b)
+            let a, h, t = total false false, total true false, total true true
+            printfn "%-9s depth %d: plain %11d  hints %11d (%.2fx)  +scores %11d (%.2fx)" label d a h (float a / float h) t (float a / float t)
 
 [<EntryPoint>]
 let main argv =

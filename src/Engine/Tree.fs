@@ -2,6 +2,7 @@ namespace Snake.Engine
 
 open System
 open System.Diagnostics
+open System.Threading
 
 /// Result of one search: the chosen move, the deepest fully completed depth, the score and the node count.
 [<Struct>]
@@ -34,19 +35,22 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
     let tmp = Array.zeroCreate<Dir> 4
     let rootScore = Array.zeroCreate<float> 4
 
-    // Move ordering. None of this changes the search result, only how early cut-offs happen.
-    // Hint table: position hash -> my best move there. Positions recur on every iteration of iterative
-    // deepening and, partly, on the next turn; a collision only costs ordering, never correctness.
-    static let ttBits = 18
+    // Transposition table: position hash -> best move (ordering hint) and, if enabled, a score bound at some
+    // remaining depth. Positions recur across iterative-deepening iterations and, via the persistent table, on the
+    // next turn and during pondering. The hash covers bodies, lengths, health, food and hazards, i.e. everything
+    // the value depends on given (depth, me, weights), which are fixed per Searcher.
+    static let ttBits = 19
     let ttMask = (1 <<< ttBits) - 1
     let ttKey = Array.zeroCreate<uint64> (1 <<< ttBits)
+    let ttVal = Array.zeroCreate<float> (1 <<< ttBits)
+    let ttDepth = Array.zeroCreate<byte> (1 <<< ttBits)
+    let ttFlag = Array.zeroCreate<byte> (1 <<< ttBits) // 0 none, 1 exact, 2 lower bound, 3 upper bound
     let ttMove = Array.zeroCreate<byte> (1 <<< ttBits)
-    let zrng = Random(12345)
-    let z () = uint64 (zrng.NextInt64()) ^^^ (uint64 (zrng.NextInt64()) <<< 1)
-    let zHead = Array.init (maxSnakes * geo.Cells) (fun _ -> z ())
-    let zBody = Array.init (maxSnakes * geo.Cells) (fun _ -> z ())
-    let zFood = Array.init geo.Cells (fun _ -> z ())
-    // History: (head cell, dir) -> how often that move was best / caused a cut-off, mine and the opponents' apart
+    let ttAge = Array.zeroCreate<byte> (1 <<< ttBits)
+    let mutable age = 0uy
+    let mutable useScores = true
+    let mutable exactDepthOnly = false
+    let mutable stopRequested = false
     let histMe = Array.zeroCreate<int> (geo.Cells * 4)
     let histOpp = Array.zeroCreate<int> (geo.Cells * 4)
     let key = Array.zeroCreate<int> 4
@@ -77,28 +81,28 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         with get () = maxDepth
         and set v = maxDepth <- v
 
+    /// Reuse stored scores, not just best-move hints.
+    member _.UseScores
+        with get () = useScores
+        and set v = useScores <- v
+
+    /// Only reuse scores stored at exactly the same remaining depth (keeps fixed-depth results identical; tests).
+    member _.ExactDepthOnly
+        with get () = exactDepthOnly
+        and set v = exactDepthOnly <- v
+
+    /// Ask a running Search (on another thread) to stop soon. Cleared when the next Search starts.
+    member _.Stop() = Volatile.Write(&stopRequested, true)
+
     /// Forget hints and history (e.g. a new game).
     member _.Clear() =
         Array.Clear ttKey
+        Array.Clear ttFlag
         Array.Clear histMe
         Array.Clear histOpp
 
-    member private _.Hash(b: Board) =
-        let cells = geo.Cells
-        let mutable h = 0UL
-
-        for s in 0 .. b.NumSnakes - 1 do
-            if b.Alive s then
-                h <- h ^^^ zHead.[s * cells + b.Head s]
-
-                for k in 1 .. b.Length s - 1 do
-                    h <- h ^^^ zBody.[s * cells + b.Body(s, k)]
-
-        for c in 0 .. cells - 1 do
-            if b.IsFood c then h <- h ^^^ zFood.[c]
-
-        // Never 0, so an empty slot cannot match
-        h ||| 1UL
+    // Never 0, so an empty slot cannot match
+    member private _.Hash(b: Board) = b.Hash ||| 1UL
 
     /// Sorts dst.[off .. off+n-1] by descending hist.[head*4+dir], with `first` (if present) in front.
     member private _.Order(dst: Dir[], off: int, n: int, hist: int[], head: int, first: int) =
@@ -183,9 +187,21 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
 
         best
 
+    /// Win/loss scores encode the ply they happen at; the table stores them relative to the node instead.
+    static member ToTT(v: float, ply: int) =
+        if v > win / 2.0 then v + float ply
+        elif v < -win / 2.0 then v - float ply
+        else v
+
+    static member FromTT(v: float, ply: int) =
+        if v > win / 2.0 then v - float ply
+        elif v < -win / 2.0 then v + float ply
+        else v
+
     member private _.CheckTime() =
         if (nodeLimit > 0L && nodes >= nodeLimit)
-           || ((nodes &&& checkMask) = 0L && Stopwatch.GetTimestamp() > deadline) then
+           || ((nodes &&& checkMask) = 0L
+               && (Stopwatch.GetTimestamp() > deadline || Volatile.Read(&stopRequested))) then
             aborted <- true
 
     /// Value of boards.[ply] for me with `depth` plies left, inside the window (alpha, beta).
@@ -199,11 +215,29 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         let mutable hash = 0UL
         let mutable slot = 0
 
+        let mutable cut = nan
+
         if ordering && ply > 0 then
             hash <- this.Hash b
             slot <- int hash &&& ttMask
-            let hint = if ttKey.[slot] = hash then int ttMove.[slot] else -1
-            if nm > 1 then this.Order(mine, 0, nm, histMe, myHead0, hint)
+            let hit = ttKey.[slot] = hash && ttFlag.[slot] <> 0uy
+
+            if hit && useScores then
+                let td = int ttDepth.[slot]
+
+                if td = depth || (td > depth && not exactDepthOnly) then
+                    let v = Searcher.FromTT(ttVal.[slot], ply)
+
+                    match ttFlag.[slot] with
+                    | 1uy -> cut <- v
+                    | 2uy when v >= beta -> cut <- v
+                    | 3uy when v <= alpha -> cut <- v
+                    | _ -> ()
+
+            if Double.IsNaN cut && nm > 1 then
+                this.Order(mine, 0, nm, histMe, myHead0, (if hit then int ttMove.[slot] else -1))
+
+        if not (Double.IsNaN cut) then cut else
 
         // Opponents: adversarial if their head can meet mine within the remaining plies
         let myHead = b.Head me
@@ -299,9 +333,21 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
             let i4 = myHead0 * 4 + int d
             histMe.[i4] <- histMe.[i4] + depth * depth
 
-            if ply > 0 then
+        if ordering && not aborted && ply > 0 then
+            // Same position: keep the deeper result (it may come from pondering, i.e. an older search).
+            // Other position: keep the deeper entry of the current search, entries of older searches can go.
+            let keep =
+                ttFlag.[slot] <> 0uy
+                && depth < int ttDepth.[slot]
+                && (ttKey.[slot] = hash || ttAge.[slot] = age)
+
+            if not keep then
                 ttKey.[slot] <- hash
-                ttMove.[slot] <- byte d
+                ttVal.[slot] <- Searcher.ToTT(best, ply)
+                ttDepth.[slot] <- byte depth
+                ttFlag.[slot] <- (if best <= alpha then 3uy elif best >= beta then 2uy else 1uy)
+                ttMove.[slot] <- byte mine.[bestI]
+                ttAge.[slot] <- age
 
         best
 
@@ -312,6 +358,9 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         nodes <- 0L
         aborted <- false
         boards.[0].CopyFrom root
+
+        age <- age + 1uy
+        Volatile.Write(&stopRequested, false)
 
         // Old history still says something about this game, but recent results should dominate
         for i in 0 .. histMe.Length - 1 do

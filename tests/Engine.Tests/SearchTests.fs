@@ -36,6 +36,7 @@ let positions (seed: int) (count: int) =
 let fixedDepth (ordering: bool) (depth: int) (b: Board) =
     let s = Searcher(geo, 4, Weights.Standard)
     s.Ordering <- ordering
+    s.ExactDepthOnly <- true
     s.MaxDepth <- depth
     s.SearchFor(b, 0, 600_000.0)
 
@@ -54,3 +55,16 @@ let ``move ordering cuts the tree`` () =
     let total o = ps |> Array.sumBy (fun b -> (fixedDepth o 5 b).Nodes)
     let plain, ordered = total false, total true
     Assert.True(ordered < plain, $"ordered {ordered} vs plain {plain}")
+
+[<Fact>]
+let ``reusing a persistent table keeps the result at least as deep`` () =
+    // Search once, then again on the same searcher: the second run must reach at least the same depth on far
+    // fewer nodes, and agree on the score at the depth both completed (deeper entries may only refine it).
+    for b in positions 5 15 do
+        let s = Searcher(geo, 4, Weights.Standard)
+        s.MaxDepth <- 5
+        let first = s.SearchFor(b, 0, 600_000.0)
+        let second = s.SearchFor(b, 0, 600_000.0)
+        Assert.Equal(first.Depth, second.Depth)
+        Assert.Equal(first.Score, second.Score)
+        Assert.True(second.Nodes * 3L <= first.Nodes + 50L, $"second {second.Nodes} vs first {first.Nodes}")

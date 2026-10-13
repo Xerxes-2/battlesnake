@@ -1,10 +1,12 @@
 /// Local self-play on the official standard map rules (BattlesnakeOfficial/rules: PlaceSnakesFixed,
 /// PlaceFoodFixed, standard food spawning). Game rules come from our own engine, which the tests pin to the official one.
 ///
-///   Arena match <botA> <botB> [--mode duel|standard] [--games N] [--par P] [--seed S]
+///   Arena match <botA> <botB> [--mode duel|standard] [--games MAX] [--sprt elo0,elo1] [--fixed] [--par P] [--seed S]
+///     SPRT by default (H0 elo<=0 vs H1 elo>=20, alpha=beta=0.05), stops when decided; --fixed plays exactly --games
 ///   Arena tune  [--mode duel|standard] [--nodes N] [--iters N] [--batch B] [--from weights] [--par P]
 ///
-///   bot:  base | search:<ms> | nodes:<n> | plain:<n> (nodes without move ordering)   optionally followed by @<weights>
+///   bot:  base | search:<ms> | nodes:<n> | plain:<n> (no ordering) | hint:<n> (no score reuse)
+///         | ponder:<n>:<p> (p more nodes after each move)   optionally followed by @<weights>
 ///   weights: "name=value,..." or a path to a file in that format (see Weights.Names)
 module Snake.Arena.Program
 
@@ -15,6 +17,18 @@ open System.Threading.Tasks
 open Snake.Engine
 
 type Bot = Board -> int -> Dir
+
+/// Throughput accounting across all games (for judging the arena itself, not the bots).
+let mutable totalNodes = 0L
+let count (r: SearchInfo) =
+    Interlocked.Add(&totalNodes, r.Nodes) |> ignore
+    r.Move
+
+let stats' (sw: Diagnostics.Stopwatch) =
+    let s = sw.Elapsed.TotalSeconds
+    sprintf "%.1fM nodes/s, GC pause %.1fs, gen2 %d, alloc %.1f GB"
+        (float totalNodes / s / 1e6) (GC.GetTotalPauseDuration().TotalSeconds) (GC.CollectionCount 2)
+        (float (GC.GetTotalAllocatedBytes false) / 1e9)
 
 let parseWeights (s: string) =
     if File.Exists s then Weights.Parse(File.ReadAllText s) else Weights.Parse s
@@ -27,18 +41,36 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
     | [| "search"; ms |] ->
         let ms = float ms
         let sr = Searcher(geo, maxSnakes, w)
-        fun b s -> sr.SearchFor(b, s, ms).Move
+        fun b s -> count (sr.SearchFor(b, s, ms))
     | [| "nodes"; n |] ->
         let sr = Searcher(geo, maxSnakes, w)
         sr.NodeLimit <- int64 n
         // Generous deadline: the node limit is what stops the search
-        fun b s -> sr.SearchFor(b, s, 10_000.0).Move
+        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
+    | [| "hint"; n |] ->
+        // move ordering hints only, no score reuse
+        let sr = Searcher(geo, maxSnakes, w)
+        sr.NodeLimit <- int64 n
+        sr.UseScores <- false
+        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
+    | [| "ponder"; n; p |] ->
+        // After answering, keep searching the same position for p more nodes (the server does this while the
+        // response travels and the other snakes think); the table carries it into the next turn.
+        let sr = Searcher(geo, maxSnakes, w)
+        let n, p = int64 n, int64 p
+
+        fun b s ->
+            sr.NodeLimit <- n
+            let m = count (sr.SearchFor(b, s, 10_000.0))
+            sr.NodeLimit <- p
+            count (sr.SearchFor(b, s, 10_000.0)) |> ignore
+            m
     | [| "plain"; n |] ->
         // nodes:<n> without move ordering, for A/B
         let sr = Searcher(geo, maxSnakes, w)
         sr.NodeLimit <- int64 n
         sr.Ordering <- false
-        fun b s -> sr.SearchFor(b, s, 10_000.0).Move
+        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
     | _ -> failwith $"unknown bot {spec}"
 
 let makeBot geo maxSnakes (spec: string) =
@@ -146,36 +178,122 @@ let seats mode flip (a: 'T) (b: 'T) =
 
 let geo11 = Geometry(11, 11)
 
+/// Elo <-> expected score (logistic, 400 scale)
+let eloToScore (e: float) = 1.0 / (1.0 + Math.Pow(10.0, -e / 400.0))
+let scoreToElo (s: float) = -400.0 * Math.Log10(1.0 / Math.Clamp(s, 1e-6, 1.0 - 1e-6) - 1.0)
+
+/// Results of seat-swapped game pairs. A pair scores 0, 1/4, ..., 1 for A (the pentanomial model used by
+/// fishtest): start-position luck mostly cancels inside a pair, so the variance is lower than per game.
+type PairStats() =
+    let counts = Array.zeroCreate<int> 5 // pair points for A in half-points: 0..4
+
+    member _.Add(halfPoints: int) = counts.[halfPoints] <- counts.[halfPoints] + 1
+    member _.Pairs = Array.sum counts
+    member _.Counts = counts
+
+    /// Mean and variance of the pair score with 0.5 pseudo-pairs per outcome: without them a short run of
+    /// identical pairs has zero variance and the LLR explodes. Pulls towards 50%, i.e. errs on the safe side.
+    member this.MeanVar() =
+        let c k = float counts.[k] + 0.5
+        let n = Seq.sum (Seq.init 5 c)
+        let mean = (Seq.sum (Seq.init 5 (fun k -> c k * float k / 4.0))) / n
+        let var = (Seq.sum (Seq.init 5 (fun k -> c k * (float k / 4.0 - mean) ** 2.0))) / n
+        mean, var
+
+    /// GSPRT log-likelihood ratio of H1 (elo1) vs H0 (elo0), normal approximation (Van den Bergh).
+    member this.Llr(elo0: float, elo1: float) =
+        if this.Pairs < 2 then 0.0
+        else
+            let mean, var = this.MeanVar()
+            let s0, s1 = eloToScore elo0, eloToScore elo1
+            float this.Pairs * (s1 - s0) * (2.0 * mean - s0 - s1) / (2.0 * var)
+
+    /// Elo estimate and 95% interval
+    member this.Elo() =
+        let mean, var = this.MeanVar()
+        let se = sqrt (var / float this.Pairs)
+        scoreToElo mean, scoreToElo (mean - 1.96 * se), scoreToElo (mean + 1.96 * se)
+
+/// A vs B. Games come in seat-swapped pairs with the same seed. By default runs an SPRT for H0: elo <= elo0
+/// vs H1: elo >= elo1 (alpha = beta = 0.05) and stops as soon as it decides; --games is the cap.
+/// --fixed plays exactly --games games.
 let runMatch (argv: string[]) =
     let a, bSpec = argv.[1], argv.[2]
     let mode = opt argv "--mode" "duel"
-    let games = int (opt argv "--games" "100")
-    let par = int (opt argv "--par" (string (max 1 (Environment.ProcessorCount / 2))))
+    let fixedN = argv |> Array.contains "--fixed"
+    let games = (int (opt argv "--games" (if fixedN then "100" else "2000")) + 1) / 2 * 2
+    let par = int (opt argv "--par" (string Environment.ProcessorCount))
     let seed0 = int (opt argv "--seed" "1")
+    let bounds = (opt argv "--sprt" "0,20").Split(',') |> Array.map float
+    let elo0, elo1 = bounds.[0], bounds.[1]
+    let lower, upper = Math.Log(0.05 / 0.95), Math.Log(0.95 / 0.05)
+    let stats = PairStats()
+    let results = Array.create games -1 // per game: half-points for A (0, 1, 2), -1 = not finished
     let mutable winsA = 0
     let mutable winsB = 0
     let mutable draws = 0
     let mutable turns = 0L
+    let mutable played = 0
+    let mutable verdict = ""
+    let mutable stop = false
     let sw = Diagnostics.Stopwatch.StartNew()
+    let mutable lastReport = 0.0
 
-    // Games come in pairs with the same seed and swapped seats, which cancels most start-position luck
-    Parallel.For(0, games, ParallelOptions(MaxDegreeOfParallelism = par), fun g ->
-        let specs = seats mode (g % 2 = 1) a bSpec
-        let isA = seats mode (g % 2 = 1) true false
-        let bots = specs |> Array.map (makeBot geo11 specs.Length)
-        let w, t = playBots bots (seed0 * 100_003 + g / 2)
-        Interlocked.Add(&turns, int64 t) |> ignore
+    let line () =
+        let elo, lo, hi = stats.Elo()
+        sprintf "%d pairs (%d games run), A %d / B %d / draw %d, elo %+.0f [%+.0f, %+.0f], LLR %.2f (%.2f, %.2f), pairs %A, %.0fs"
+            stats.Pairs played winsA winsB draws elo lo hi (stats.Llr(elo0, elo1)) lower upper stats.Counts sw.Elapsed.TotalSeconds
 
-        if w < 0 || a = bSpec then Interlocked.Increment(&draws) |> ignore
-        elif isA.[w] then Interlocked.Increment(&winsA) |> ignore
-        else Interlocked.Increment(&winsB) |> ignore)
-    |> ignore
+    // Games are handed out strictly in order (Parallel.For would give each thread a contiguous chunk, so a pair's
+    // two games ran one after the other and pairs completed late), so both games of a pair run at the same time.
+    let mutable next = -1
 
-    let played = float games
-    let score = (float winsA + 0.5 * float draws) / played
-    let ci = 1.96 * sqrt (score * (1.0 - score) / played)
-    printfn "%s vs %s (%s, %d games, %.0fs): A %d / B %d / draw %d  -> A score %.1f%% ± %.1f%%, avg %.0f turns"
-        a bSpec mode games sw.Elapsed.TotalSeconds winsA winsB draws (100.0 * score) (100.0 * ci) (float turns / played)
+    let play g =
+            let flip = g % 2 = 1
+            let specs = seats mode flip a bSpec
+            let isA = seats mode flip true false
+            let bots = specs |> Array.map (makeBot geo11 specs.Length)
+            let w, t = playBots bots (seed0 * 100_003 + g / 2)
+            let r = if w < 0 || a = bSpec then 1 elif isA.[w] then 2 else 0
+
+            lock stats (fun () ->
+                turns <- turns + int64 t
+                played <- played + 1
+                results.[g] <- r
+                if r = 2 then winsA <- winsA + 1
+                elif r = 0 then winsB <- winsB + 1
+                else draws <- draws + 1
+
+                let other = results.[g ^^^ 1]
+
+                // Once decided, later finishers are not counted, so the report matches the decision
+                if other >= 0 && not stop then
+                    stats.Add(r + other)
+                    let llr = stats.Llr(elo0, elo1)
+
+                    if not fixedN && stats.Pairs >= 10 && (llr <= lower || llr >= upper) then
+                        verdict <-
+                            if llr >= upper then sprintf "H1 accepted (A >= %+.0f elo)" elo1
+                            else sprintf "H0 accepted (A <= %+.0f elo)" elo0
+                        Volatile.Write(&stop, true)
+
+                    if sw.Elapsed.TotalSeconds - lastReport > 30.0 then
+                        lastReport <- sw.Elapsed.TotalSeconds
+                        eprintfn "  .. %s" (line ()))
+
+    let worker () =
+        let mutable g = Interlocked.Increment(&next)
+
+        while g < games && not (Volatile.Read(&stop)) do
+            play g
+            g <- Interlocked.Increment(&next)
+
+    Array.init par (fun _ -> Task.Factory.StartNew(worker, TaskCreationOptions.LongRunning)) |> Task.WaitAll
+
+    if verdict = "" then verdict <- if fixedN then "fixed" else "inconclusive (hit --games)"
+    printfn "%s vs %s (%s): %s" a bSpec mode verdict
+    printfn "  %s, avg %.0f turns" (line ()) (float turns / float played)
+    printfn "  arena: %s" (stats' sw)
     0
 
 /// SPSA (as in chess engine tuning): each sample perturbs every weight by ±c_i at random, plays θ+ against θ-
@@ -238,10 +356,100 @@ let runTune (argv: string[]) =
 
     0
 
+/// Diagnostic: along real games, nodes needed to complete depth D at each turn with a fresh table vs with the
+/// table left by the previous turn (searched to depth D, optionally pondered to D+1).
+let runReuse (argv: string[]) =
+    let mode = opt argv "--mode" "duel"
+    let d = int (opt argv "--depth" "7")
+    let ponder = argv |> Array.contains "--ponder"
+    let n = if mode = "duel" then 2 else 4
+    let w = if mode = "duel" then Weights.Duel else Weights.Standard
+    let mutable fresh = 0L
+    let mutable warm = 0L
+    let mutable turns = 0
+
+    for g in 1..6 do
+        let rng = Random(g)
+        let b = setup rng n
+        let persistent = Searcher(geo11, n, w)
+        let mv = Array.zeroCreate<Dir> n
+        let bots = Array.init n (fun _ -> makeBotW geo11 n "nodes:20000" w)
+
+        while b.AliveCount > 1 && b.Turn < 300 && b.Alive 0 do
+            let f = Searcher(geo11, n, w)
+            f.MaxDepth <- d
+            let rf = f.SearchFor(b, 0, 60_000.0)
+            persistent.MaxDepth <- d
+            let rp = persistent.SearchFor(b, 0, 60_000.0)
+
+            if b.Turn > 0 && rf.Depth = d then
+                fresh <- fresh + rf.Nodes
+                warm <- warm + rp.Nodes
+                turns <- turns + 1
+
+            if ponder then
+                persistent.MaxDepth <- d + 1
+                persistent.SearchFor(b, 0, 60_000.0) |> ignore
+
+            mv.[0] <- rf.Move
+            for s in 1 .. n - 1 do
+                if b.Alive s then mv.[s] <- bots.[s] b s
+
+            b.Step mv
+            spawnFood b rng
+
+    printfn "%s depth %d ponder=%b: %d turns, fresh %d nodes, warm %d nodes (%.2fx fewer)" mode d ponder turns fresh warm (float fresh / float warm)
+    0
+
+/// Diagnostic: average completed depth per turn at a node budget, for a fresh table, a persistent table, and a
+/// persistent table with p ponder nodes after each move. The game is driven by the plain persistent searcher.
+let runDepth (argv: string[]) =
+    let mode = opt argv "--mode" "duel"
+    let nodes = int64 (opt argv "--nodes" "30000")
+    let p = int64 (opt argv "--ponder" "18000")
+    let n = if mode = "duel" then 2 else 4
+    let w = if mode = "duel" then Weights.Duel else Weights.Standard
+    let sum = Array.zeroCreate<int64> 3
+    let partial = Array.zeroCreate<int64> 3
+    let mutable turns = 0
+
+    for g in 1..8 do
+        let rng = Random(100 + g)
+        let b = setup rng n
+        let sr = Array.init 3 (fun _ -> Searcher(geo11, n, w))
+        let mv = Array.zeroCreate<Dir> n
+        let bots = Array.init n (fun _ -> makeBotW geo11 n ("nodes:" + string nodes) w)
+
+        while b.AliveCount > 1 && b.Turn < 300 && b.Alive 0 do
+            let r =
+                Array.init 3 (fun i ->
+                    let s = if i = 0 then Searcher(geo11, n, w) else sr.[i]
+                    s.NodeLimit <- nodes
+                    s.SearchFor(b, 0, 60_000.0))
+
+            for i in 0..2 do
+                sum.[i] <- sum.[i] + int64 r.[i].Depth
+
+            turns <- turns + 1
+            sr.[2].NodeLimit <- p
+            sr.[2].SearchFor(b, 0, 60_000.0) |> ignore
+            mv.[0] <- r.[1].Move
+            for s in 1 .. n - 1 do
+                if b.Alive s then mv.[s] <- bots.[s] b s
+
+            b.Step mv
+            spawnFood b rng
+
+    let avg i = float sum.[i] / float turns
+    printfn "%s nodes=%d ponder=%d, %d turns: avg depth fresh %.2f, persistent %.2f, +ponder %.2f" mode nodes p turns (avg 0) (avg 1) (avg 2)
+    0
+
 [<EntryPoint>]
 let main argv =
     match argv with
     | [||] -> eprintfn "usage: Arena match <botA> <botB> ... | Arena tune ..."; 2
     | _ when argv.[0] = "match" -> runMatch argv
     | _ when argv.[0] = "tune" -> runTune argv
+    | _ when argv.[0] = "reuse" -> runReuse argv
+    | _ when argv.[0] = "depth" -> runDepth argv
     | _ -> runMatch (Array.append [| "match" |] argv)

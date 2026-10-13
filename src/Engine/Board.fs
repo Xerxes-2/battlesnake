@@ -35,6 +35,18 @@ type Geometry(width: int, height: int) =
             | 2 -> if x > 0 then c - 1 else -1
             | _ -> if x + 1 < width then c + 1 else -1)
 
+    // Zobrist keys for Board.Hash. Snake slots beyond zSnakes share keys (only costs hash quality).
+    static let zSnakes = 16
+    static let zSeed = 12345
+    let zrng = Random(zSeed)
+    let z () = uint64 (zrng.NextInt64()) ^^^ (uint64 (zrng.NextInt64()) <<< 1)
+    let zHead = Array.init (zSnakes * cells) (fun _ -> z ())
+    let zBody = Array.init (zSnakes * cells) (fun _ -> z ())
+    let zHp = Array.init (zSnakes * 101) (fun _ -> z ())
+    let zLen = Array.init (zSnakes * 256) (fun _ -> z ())
+    let zFood = Array.init cells (fun _ -> z ())
+    let zHaz = Array.init cells (fun _ -> z ())
+
     member _.Width = width
     member _.Height = height
     member _.Cells = cells
@@ -44,6 +56,16 @@ type Geometry(width: int, height: int) =
 
     /// Returns -1 when the neighbour is off the board.
     member _.Neighbor(c: int, d: Dir) = nbr.[c * 4 + int d]
+
+    member _.ZHead(s: int, c: int) = zHead.[(s &&& (zSnakes - 1)) * cells + c]
+    member _.ZBody(s: int, c: int) = zBody.[(s &&& (zSnakes - 1)) * cells + c]
+    /// Health and length together (they always change together in Step)
+    member _.ZStats(s: int, hp: int, len: int) =
+        let s = s &&& (zSnakes - 1)
+        zHp.[s * 101 + Math.Clamp(hp, 0, 100)] ^^^ zLen.[s * 256 + min 255 len]
+
+    member _.ZFood(c: int) = zFood.[c]
+    member _.ZHaz(c: int) = zHaz.[c]
 
 /// Mutable game state used by search. Copy-make: search copies with CopyFrom and then calls Step; there is no undo.
 /// Each snake's body is stored in a ring buffer: segment k is at ring[s*ringSize + (headPos+k) & mask].
@@ -75,6 +97,9 @@ type Board(geo: Geometry, maxSnakes: int) =
     let mutable numSnakes = 0
     let mutable turn = 0
     let mutable hazardDamage = 0
+    /// Zobrist hash of everything the game's future depends on except the turn number: living snakes' heads,
+    /// bodies, health and length, food and hazards. Maintained incrementally; see ComputeHash.
+    let mutable hash = 0UL
 
     member internal _.HealthArr = health
     member internal _.LengthArr = length
@@ -97,6 +122,25 @@ type Board(geo: Geometry, maxSnakes: int) =
         with get () = hazardDamage
         and set v = hazardDamage <- v
 
+    member _.Hash = hash
+
+    /// From-scratch version of Hash (reference for tests).
+    member this.ComputeHash() =
+        let mutable h = 0UL
+
+        for s in 0 .. numSnakes - 1 do
+            if alive.[s] then
+                h <- h ^^^ geo.ZHead(s, this.Head s) ^^^ geo.ZStats(s, health.[s], length.[s])
+
+                for k in 1 .. length.[s] - 1 do
+                    h <- h ^^^ geo.ZBody(s, this.Body(s, k))
+
+        for c in 0 .. cells - 1 do
+            if food.[c] then h <- h ^^^ geo.ZFood c
+            if hazard.[c] > 0uy then h <- h ^^^ geo.ZHaz c
+
+        h
+
     member _.Health(s: int) = health.[s]
     member _.Length(s: int) = length.[s]
     member _.Alive(s: int) = alive.[s]
@@ -114,8 +158,14 @@ type Board(geo: Geometry, maxSnakes: int) =
 
         n
 
-    member _.SetFood(c: int, v: bool) = food.[c] <- v
-    member _.AddHazard(c: int) = hazard.[c] <- hazard.[c] + 1uy
+    member _.SetFood(c: int, v: bool) =
+        if food.[c] <> v then
+            food.[c] <- v
+            hash <- hash ^^^ geo.ZFood c
+
+    member _.AddHazard(c: int) =
+        if hazard.[c] = 0uy then hash <- hash ^^^ geo.ZHaz c
+        hazard.[c] <- hazard.[c] + 1uy
 
     /// body.[0] is the head. Returns the snake's index.
     member _.AddSnake(hp: int, body: int[]) : int =
@@ -131,13 +181,16 @@ type Board(geo: Geometry, maxSnakes: int) =
         for k in 0 .. body.Length - 1 do
             ring.[s * ringSize + k] <- int16 body.[k]
             occ.[body.[k]] <- occ.[body.[k]] + 1uy
+            hash <- hash ^^^ (if k = 0 then geo.ZHead(s, body.[0]) else geo.ZBody(s, body.[k]))
 
+        hash <- hash ^^^ geo.ZStats(s, hp, body.Length)
         s
 
     member _.CopyFrom(o: Board) =
         numSnakes <- o.NumSnakes
         turn <- o.Turn
         hazardDamage <- o.HazardDamage
+        hash <- o.Hash
         Array.Copy(o.HealthArr, health, numSnakes)
         Array.Copy(o.LengthArr, length, numSnakes)
         Array.Copy(o.HeadPosArr, headPos, numSnakes)
@@ -152,6 +205,7 @@ type Board(geo: Geometry, maxSnakes: int) =
         b.CopyFrom this
         b
 
+    /// Removes the snake's segments; its health/length hash term is handled by Step.
     member private _.Kill(s: int) =
         alive.[s] <- false
         let b = s * ringSize
@@ -159,6 +213,7 @@ type Board(geo: Geometry, maxSnakes: int) =
         for k in 0 .. length.[s] - 1 do
             let c = int ring.[b + ((headPos.[s] + k) &&& ringMask)]
             occ.[c] <- occ.[c] - 1uy
+            hash <- hash ^^^ (if k = 0 then geo.ZHead(s, c) else geo.ZBody(s, c))
 
     /// Advances one turn following the official standard rules. moves.[s] is snake s's move; entries for dead snakes are ignored.
     /// Order: move -> health -1 -> hazard damage -> eat -> eliminate (out of bounds/starvation first, then collisions with the survivors).
@@ -171,10 +226,14 @@ type Board(geo: Geometry, maxSnakes: int) =
             elim.[s] <- false
 
             if alive.[s] then
+                // Health and length change below; their hash term is put back at the end for survivors
+                hash <- hash ^^^ geo.ZStats(s, health.[s], length.[s])
                 let b = s * ringSize
                 let h = int ring.[b + headPos.[s]]
                 let tailIdx = b + ((headPos.[s] + length.[s] - 1) &&& ringMask)
                 let tail = int ring.[tailIdx]
+                // Old head becomes body segment 1, the tail segment leaves (nothing changes for length 1)
+                if length.[s] > 1 then hash <- hash ^^^ geo.ZBody(s, h) ^^^ geo.ZBody(s, tail)
                 occ.[tail] <- occ.[tail] - 1uy
                 let nh = geo.Neighbor(h, moves.[s])
                 newHead.[s] <- nh
@@ -183,6 +242,7 @@ type Board(geo: Geometry, maxSnakes: int) =
                 let c = if nh >= 0 then nh else h
                 ring.[b + headPos.[s]] <- int16 c
                 occ.[c] <- occ.[c] + 1uy
+                hash <- hash ^^^ geo.ZHead(s, h) ^^^ geo.ZHead(s, c)
                 health.[s] <- health.[s] - 1
 
         // 2. Hazard damage (none on the standard ladder; no damage when there is food on the cell)
@@ -207,13 +267,15 @@ type Board(geo: Geometry, maxSnakes: int) =
                 ring.[b + ((headPos.[s] + length.[s]) &&& ringMask)] <- tail
                 length.[s] <- length.[s] + 1
                 occ.[int tail] <- occ.[int tail] + 1uy
+                hash <- hash ^^^ geo.ZBody(s, int tail)
 
         if ate then
             for s in 0 .. numSnakes - 1 do
                 let nh = newHead.[s]
 
-                if alive.[s] && nh >= 0 then
+                if alive.[s] && nh >= 0 && food.[nh] then
                     food.[nh] <- false
+                    hash <- hash ^^^ geo.ZFood nh
 
         // 4a. Eliminate out-of-bounds and starved snakes first; they are no longer obstacles for collision checks
         for s in 0 .. numSnakes - 1 do
@@ -239,3 +301,6 @@ type Board(geo: Geometry, maxSnakes: int) =
 
         for s in 0 .. numSnakes - 1 do
             if elim.[s] && alive.[s] then this.Kill s
+
+        for s in 0 .. numSnakes - 1 do
+            if alive.[s] then hash <- hash ^^^ geo.ZStats(s, health.[s], length.[s])

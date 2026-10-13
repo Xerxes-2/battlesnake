@@ -157,3 +157,41 @@ let ``copy is independent`` () =
     Assert.Equal(3, b.Length 0)
     Assert.True(b.IsFood(c (5, 6)))
     Assert.Equal(4, k.Length 0)
+
+[<Fact>]
+let ``incremental hash matches a from-scratch hash`` () =
+    let rng = System.Random(11)
+    let mutable steps = 0
+
+    for g in 1..400 do
+        let b = Board(geo, 4)
+        // Mix of start lengths (1 and 3) so the length-1 path is covered too
+        for x, y in [ (1, 1); (9, 9); (1, 9); (9, 1) ] do
+            let c = geo.Cell(x, y)
+            b.AddSnake(30 + rng.Next 70, (if rng.Next 3 = 0 then [| c |] else [| c; c; c |])) |> ignore
+
+        if g % 3 = 0 then
+            b.HazardDamage <- 14
+            for _ in 1..20 do b.AddHazard(rng.Next geo.Cells)
+
+        for _ in 1..10 do b.SetFood(rng.Next geo.Cells, true)
+        Assert.Equal(b.ComputeHash(), b.Hash)
+        let moves = Array.zeroCreate<Dir> 4
+
+        while b.AliveCount >= 1 && b.Turn < 200 do
+            for s in 0..3 do
+                moves.[s] <- enum<Dir> (rng.Next 4)
+                // Usually dodge, sometimes not, so all death causes happen
+                if rng.Next 10 > 0 then
+                    for _ in 1..3 do
+                        let nb = geo.Neighbor(b.Head s, moves.[s])
+                        if nb < 0 || b.Occupancy nb > 0 then moves.[s] <- enum<Dir> (rng.Next 4)
+
+            b.Step moves
+            if rng.Next 100 < 30 then b.SetFood(rng.Next geo.Cells, true)
+            if rng.Next 100 < 5 then b.SetFood(rng.Next geo.Cells, false)
+            Assert.Equal(b.ComputeHash(), b.Hash)
+            Assert.Equal(b.Hash, b.Clone().Hash)
+            steps <- steps + 1
+
+    Assert.True(steps > 10_000)
