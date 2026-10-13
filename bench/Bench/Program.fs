@@ -87,8 +87,32 @@ let measure name (seconds: float) (work: unit -> int) =
     Array.sortInPlace rates
     printfn "%-28s median %12.0f /s   (min %.0f, max %.0f)" name rates.[rounds / 2] rates.[0] rates.[rounds - 1]
 
+/// Fixed-time search on mid-game positions: nodes/s and the average completed depth (what actually matters)
+let searchBench (positions: Board[]) (ms: float) (rounds: int) =
+    let sr = Searcher(geo, 4, Weights.Standard)
+    let mutable nodes = 0L
+    let mutable depth = 0L
+    let mutable n = 0
+    let sw = Stopwatch.StartNew()
+
+    for _ in 1..rounds do
+        for p in positions do
+            let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
+            let r = sr.SearchFor(p, me, ms)
+            nodes <- nodes + r.Nodes
+            depth <- depth + int64 r.Depth
+            n <- n + 1
+
+    printfn "%-28s %12.0f nodes/s   avg depth %.2f over %d searches" $"search {ms}ms" (float nodes / sw.Elapsed.TotalSeconds) (float depth / float n) n
+
 [<EntryPoint>]
-let main _ =
+let main argv =
+    if argv |> Array.contains "search" then
+        let positions = samplePositions 32
+        searchBench positions 50.0 1 // warm-up
+        searchBench positions 100.0 (if argv |> Array.contains "long" then 10 else 2)
+        exit 0
+
     printfn "%s | %s | %s | cores=%d" RuntimeInformation.FrameworkDescription (string RuntimeInformation.OSArchitecture) RuntimeInformation.RuntimeIdentifier Environment.ProcessorCount
 
     let init = start ()
@@ -113,6 +137,16 @@ let main _ =
     measure "evaluate (voronoi)" 1.0 (fun () ->
         i <- (i + 1) % positions.Length
         an.Evaluate(positions.[i], 0) |> ignore
+        1)
+
+    measure "voronoi scalar" 1.0 (fun () ->
+        i <- (i + 1) % positions.Length
+        an.VoronoiScalar positions.[i]
+        1)
+
+    measure "voronoi bits" 1.0 (fun () ->
+        i <- (i + 1) % positions.Length
+        an.VoronoiBits positions.[i]
         1)
 
     let policy = Policy(geo, 4)

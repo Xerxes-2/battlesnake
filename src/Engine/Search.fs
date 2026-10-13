@@ -1,6 +1,7 @@
 namespace Snake.Engine
 
 open System
+open System.Numerics
 
 /// Evaluation weights. Kept as a flat array so the tuner can perturb them generically; the names are the
 /// stable interface (weight files, logs). Defaults are the hand-picked starting point.
@@ -67,15 +68,168 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
     let area = Array.zeroCreate<int> maxSnakes
     let nearestFood = Array.zeroCreate<int> maxSnakes
 
+    // Bitboard flood fill (boards up to 128 cells, which covers 7x7 and 11x11): per snake a frontier,
+    // plus a "contested" pseudo-player whose frontier carries the -2 owner on, exactly like the scalar BFS.
+    let bitsOk = cells <= 128
+    let frLo = Array.zeroCreate<uint64> (maxSnakes + 1)
+    let frHi = Array.zeroCreate<uint64> (maxSnakes + 1)
+
+    let maskOf (f: int -> bool) (half: int) =
+        let mutable m = 0UL
+
+        if bitsOk then
+            for c in half * 64 .. min cells (half * 64 + 64) - 1 do
+                if f c then m <- m ||| (1UL <<< (c - half * 64))
+
+        m
+
+    let fullLo, fullHi = maskOf (fun _ -> true) 0, maskOf (fun _ -> true) 1
+    let nc0Lo, nc0Hi = maskOf (fun c -> geo.X c <> 0) 0, maskOf (fun c -> geo.X c <> 0) 1
+    let ncLLo, ncLHi = maskOf (fun c -> geo.X c <> geo.Width - 1) 0, maskOf (fun c -> geo.X c <> geo.Width - 1) 1
+    let w1 = geo.Width
+
     new(geo, maxSnakes) = Analyzer(geo, maxSnakes, Weights.Default)
 
     member _.Area(s: int) = area.[s]
     /// Distance to the nearest food inside the snake's own territory; Int32.MaxValue when there is none.
     member _.NearestFood(s: int) = nearestFood.[s]
+    /// Only filled by VoronoiScalar (the bitboard version computes areas and food distances only).
     member _.Owner(c: int) = owner.[c]
     member _.Dist(c: int) = dist.[c]
 
-    member _.Voronoi(b: Board) =
+    /// Fills Area and NearestFood. Uses the bitboard version when the board fits in 128 cells.
+    member this.Voronoi(b: Board) =
+        if bitsOk then this.VoronoiBits b else this.VoronoiScalar b
+
+    /// Same result as VoronoiScalar for Area/NearestFood, one BFS level per iteration over whole bitboards.
+    /// A board is two uint64 halves (cells 0-63 in lo, 64-127 in hi); UInt128 was only ~1.3x faster than the
+    /// scalar BFS because its variable shifts are branchy, the hand-split version is what makes this pay off.
+    member _.VoronoiBits(b: Board) =
+        let n = b.NumSnakes
+        let mutable blLo = 0UL
+        let mutable blHi = 0UL
+        let mutable onLo = 0UL
+        let mutable onHi = 0UL
+        let mutable twLo = 0UL
+        let mutable twHi = 0UL
+        let mutable maxLen = 0
+
+        for s in 0 .. n - 1 do
+            area.[s] <- 0
+            nearestFood.[s] <- Int32.MaxValue
+            frLo.[s] <- 0UL
+            frHi.[s] <- 0UL
+
+            if b.Alive s then
+                let len = b.Length s
+                if len > maxLen then maxLen <- len
+
+                for k in 0 .. len - 1 do
+                    let c = b.Body(s, k)
+                    if c < 64 then blLo <- blLo ||| (1UL <<< c) else blHi <- blHi ||| (1UL <<< (c - 64))
+
+                let h = b.Head s
+                let hl = if h < 64 then 1UL <<< h else 0UL
+                let hh = if h < 64 then 0UL else 1UL <<< (h - 64)
+                twLo <- twLo ||| (onLo &&& hl)
+                twHi <- twHi ||| (onHi &&& hh)
+                onLo <- onLo ||| hl
+                onHi <- onHi ||| hh
+                frLo.[s] <- hl
+                frHi.[s] <- hh
+
+        // Two heads on one cell: contested from the start
+        for s in 0 .. n - 1 do
+            frLo.[s] <- frLo.[s] &&& ~~~twLo
+            frHi.[s] <- frHi.[s] &&& ~~~twHi
+
+        frLo.[n] <- twLo
+        frHi.[n] <- twHi
+        let mutable rLo = onLo
+        let mutable rHi = onHi
+        let mutable fdLo = 0UL
+        let mutable fdHi = 0UL
+
+        for c in 0 .. cells - 1 do
+            if b.IsFood c then
+                if c < 64 then fdLo <- fdLo ||| (1UL <<< c) else fdHi <- fdHi ||| (1UL <<< (c - 64))
+
+        let w = w1
+        let iw = 64 - w1
+        let mutable d = 0
+        let mutable active = true
+
+        while active do
+            d <- d + 1
+
+            // Segment k frees up once d >= len - k. A cell stacked after eating (k and k-1 on the same cell)
+            // is freed by its younger copy one level later, matching the scalar max over segments.
+            if d < maxLen then
+                for s in 0 .. n - 1 do
+                    if b.Alive s then
+                        let k = b.Length s - d
+
+                        if k >= 1 then
+                            let c = b.Body(s, k)
+
+                            if c <> b.Body(s, k - 1) then
+                                if c < 64 then blLo <- blLo &&& ~~~(1UL <<< c) else blHi <- blHi &&& ~~~(1UL <<< (c - 64))
+
+            let freeLo = fullLo &&& ~~~(rLo ||| blLo)
+            let freeHi = fullHi &&& ~~~(rHi ||| blHi)
+            onLo <- 0UL
+            onHi <- 0UL
+            twLo <- 0UL
+            twHi <- 0UL
+
+            for p in 0..n do
+                let lo = frLo.[p]
+                let hi = frHi.[p]
+
+                if (lo ||| hi) <> 0UL then
+                    // left/right shifts by one column (masked against wrapping), up/down by one row
+                    let eLo =
+                        (((lo <<< 1) &&& nc0Lo)
+                         ||| (((lo >>> 1) ||| (hi <<< 63)) &&& ncLLo)
+                         ||| (lo <<< w)
+                         ||| ((lo >>> w) ||| (hi <<< iw)))
+                        &&& freeLo
+
+                    let eHi =
+                        ((((hi <<< 1) ||| (lo >>> 63)) &&& nc0Hi)
+                         ||| ((hi >>> 1) &&& ncLHi)
+                         ||| ((hi <<< w) ||| (lo >>> iw))
+                         ||| (hi >>> w))
+                        &&& freeHi
+
+                    twLo <- twLo ||| (onLo &&& eLo)
+                    twHi <- twHi ||| (onHi &&& eHi)
+                    onLo <- onLo ||| eLo
+                    onHi <- onHi ||| eHi
+                    frLo.[p] <- eLo
+                    frHi.[p] <- eHi
+
+            for s in 0 .. n - 1 do
+                let oLo = frLo.[s] &&& ~~~twLo
+                let oHi = frHi.[s] &&& ~~~twHi
+
+                if (oLo ||| oHi) <> 0UL then
+                    area.[s] <- area.[s] + BitOperations.PopCount oLo + BitOperations.PopCount oHi
+
+                    if nearestFood.[s] = Int32.MaxValue && ((oLo &&& fdLo) ||| (oHi &&& fdHi)) <> 0UL then
+                        nearestFood.[s] <- d
+
+                frLo.[s] <- oLo
+                frHi.[s] <- oHi
+
+            frLo.[n] <- frLo.[n] ||| twLo
+            frHi.[n] <- frHi.[n] ||| twHi
+            rLo <- rLo ||| onLo
+            rHi <- rHi ||| onHi
+            active <- (onLo ||| onHi) <> 0UL
+
+    /// Reference BFS (any board size); also fills Owner and Dist.
+    member _.VoronoiScalar(b: Board) =
         let n = b.NumSnakes
         Array.Fill(owner, -1)
         Array.Clear(vacate)
