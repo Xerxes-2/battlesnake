@@ -45,7 +45,7 @@ let main args =
     builder.Logging.AddFilter("Microsoft", LogLevel.Warning) |> ignore
     let app = builder.Build()
     let log = app.Logger
-    log.LogInformation("runtime {rt}, warmup {ms:F0} ms", Runtime.InteropServices.RuntimeInformation.FrameworkDescription, warmup ())
+    log.LogInformation("snake-server {v}, runtime {rt}, warmup {ms:F0} ms", version, Runtime.InteropServices.RuntimeInformation.FrameworkDescription, warmup ())
 
     app.MapGet("/", Func<obj>(fun () -> box info)) |> ignore
 

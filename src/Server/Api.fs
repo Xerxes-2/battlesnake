@@ -3,6 +3,7 @@
 module Snake.Server.Api
 
 open System.Collections.Concurrent
+open System.Reflection
 open Snake.Engine
 
 type Coord = { X: int; Y: int }
@@ -48,13 +49,24 @@ type GameState =
       Board: BoardDto
       You: SnakeDto }
 
+/// "0.4.0+87ebf06": Version from Directory.Build.props plus the commit. Nix passes the flake's short rev as
+/// SourceRevisionId; local builds get the full git sha from the SDK, shortened here to match.
+let version =
+    let v =
+        Assembly.GetEntryAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>().InformationalVersion
+
+    // Only a full 40-char sha gets shortened; "abc1234-dirty" from a dirty flake tree stays as is
+    match v.IndexOf '+' with
+    | i when i >= 0 && v.Length - i - 1 = 40 -> v.[.. i + 7]
+    | _ -> v
+
 let info =
     {| apiversion = "1"
        author = "xerxes2"
        color = "#7b2ff7"
        head = "default"
        tail = "default"
-       version = "0.1.0" |}
+       version = version |}
 
 let private geometries = ConcurrentDictionary<struct (int * int), Geometry>()
 

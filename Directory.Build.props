@@ -1,5 +1,7 @@
 <Project>
   <PropertyGroup>
+    <!-- 唯一的版本号来源：Nix 包版本和 GET / 返回的 version 都从这里来。改了引擎行为就 bump -->
+    <Version>0.4.0</Version>
     <!-- 本地同时编 net10/net11 做性能对比；Nix 构建只有 SDK 10，用 -p:SnakeTargetFrameworks=net10.0 覆盖 -->
     <SnakeTargetFrameworks Condition="'$(SnakeTargetFrameworks)' == ''">net10.0;net11.0</SnakeTargetFrameworks>
     <Nullable>disable</Nullable>

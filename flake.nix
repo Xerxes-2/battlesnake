@@ -14,7 +14,9 @@
     in
     {
       packages = forAll (pkgs: rec {
-        snake-server = pkgs.callPackage ./nix/package.nix { };
+        snake-server = pkgs.callPackage ./nix/package.nix {
+          rev = self.shortRev or self.dirtyShortRev or "unknown";
+        };
         default = snake-server;
       });
 
