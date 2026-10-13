@@ -56,6 +56,7 @@ let main args =
         log.LogInformation("end {game} turn={turn} {result}", gs.Game.Id, gs.Turn, (if won then "WIN/ALIVE" else "LOSS"))
         Results.Ok())) |> ignore
 
-    let port = Environment.GetEnvironmentVariable "PORT" |> Option.ofObj |> Option.defaultValue "8000"
-    app.Run($"http://0.0.0.0:{port}")
+    let env name dflt = Environment.GetEnvironmentVariable name |> Option.ofObj |> Option.defaultValue dflt
+    let host, port = env "HOST" "0.0.0.0", env "PORT" "8000"
+    app.Run($"http://{host}:{port}")
     0
