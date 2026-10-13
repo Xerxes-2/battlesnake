@@ -29,9 +29,17 @@ in
       default = 8000;
       description = "监听端口。";
     };
+
+    openFirewall = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "在 NixOS 防火墙放行 port（直连暴露时用，host 也要改成 0.0.0.0）。";
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
+
     systemd.services.battlesnake = {
       description = "Battlesnake server";
       wantedBy = [ "multi-user.target" ];
