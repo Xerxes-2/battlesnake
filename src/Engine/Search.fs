@@ -15,9 +15,10 @@ type Weights(values: float[]) =
 
     static member Names = names
     static member Default = Weights(Array.copy defaults)
-    /// Tuned by `Arena tune --mode duel --nodes 5000` (SPSA, ~19k games); copy of tune/weights-duel.txt.
+    /// Tuned by `Arena tune --mode duel --nodes 5000` (SPSA, ~19k games), then refined at `--nodes 30000` (100 iters x 32
+    /// pairs, ~6.4k games; SPRT vs the 5k weights at 30k nodes: +35 elo [+12, +59]); copy of tune/weights-duel-30k.txt.
     /// Area and oppArea are nearly collinear 1v1 (they sum to roughly the free board), so their split is arbitrary.
-    static member val Duel = Weights.Parse "area=0.726,oppArea=1.017,len=72.235,lenCap=5.935,trapped=37.321,starve=3635.142,noFoodHp=35.183,noFood=9.555,hungryHp=41.814,foodHungry=8.704,foodBehind=4.158,foodAhead=0.414,leadLen=1.4"
+    static member val Duel = Weights.Parse "area=1.973,oppArea=1.681,len=100.778,lenCap=5.506,trapped=32.391,starve=2854.777,noFoodHp=28.094,noFood=9.887,hungryHp=49.46,foodHungry=7.999,foodBehind=3.469,foodAhead=0.118,leadLen=1.259"
     /// Tuned by `Arena tune --mode standard --nodes 5000` (SPSA, ~10k games); copy of tune/weights-standard.txt
     static member val Standard = Weights.Parse "area=2.616,oppArea=0.599,len=60.101,lenCap=5.895,trapped=1.078,starve=5854.651,noFoodHp=23.906,noFood=10.768,hungryHp=27.447,foodHungry=9.451,foodBehind=2.741,foodAhead=2.194,leadLen=3.089"
     member _.Values = values
