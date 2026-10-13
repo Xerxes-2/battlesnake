@@ -18,6 +18,17 @@ type SearchInfo =
 /// makes head-on collisions and cut-offs safe). Only opponents whose head can reach mine within the remaining
 /// plies are searched adversarially; far-away snakes play a cheap default move, so 4-snake games still get depth.
 /// All boards and move buffers are preallocated per ply; a search does not allocate.
+/// Transposition table entry. The slot index is the hash's low bits; Check holds its high 32 bits.
+[<Struct; NoEquality; NoComparison>]
+type TTEntry =
+    val mutable Val: float
+    val mutable Check: uint32
+    val mutable Depth: byte
+    /// 0 none, 1 exact, 2 lower bound, 3 upper bound
+    val mutable Flag: byte
+    val mutable Move: byte
+    val mutable Age: byte
+
 [<Sealed>]
 type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
     static let maxPly = 64
@@ -41,12 +52,9 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
     // the value depends on given (depth, me, weights), which are fixed per Searcher.
     static let ttBits = 19
     let ttMask = (1 <<< ttBits) - 1
-    let ttKey = Array.zeroCreate<uint64> (1 <<< ttBits)
-    let ttVal = Array.zeroCreate<float> (1 <<< ttBits)
-    let ttDepth = Array.zeroCreate<byte> (1 <<< ttBits)
-    let ttFlag = Array.zeroCreate<byte> (1 <<< ttBits) // 0 none, 1 exact, 2 lower bound, 3 upper bound
-    let ttMove = Array.zeroCreate<byte> (1 <<< ttBits)
-    let ttAge = Array.zeroCreate<byte> (1 <<< ttBits)
+    // One 16-byte entry per slot so a probe touches a single cache line (separate arrays per field cost up to six
+    // misses per probe, which showed up on the A1's small caches).
+    let tt = Array.zeroCreate<TTEntry> (1 <<< ttBits)
     let mutable age = 0uy
     let mutable useScores = true
     let mutable exactDepthOnly = false
@@ -96,8 +104,7 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
 
     /// Forget hints and history (e.g. a new game).
     member _.Clear() =
-        Array.Clear ttKey
-        Array.Clear ttFlag
+        Array.Clear tt
         Array.Clear histMe
         Array.Clear histOpp
 
@@ -220,22 +227,23 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         if ordering && ply > 0 then
             hash <- this.Hash b
             slot <- int hash &&& ttMask
-            let hit = ttKey.[slot] = hash && ttFlag.[slot] <> 0uy
+            let e = &tt.[slot]
+            let hit = e.Check = uint32 (hash >>> 32) && e.Flag <> 0uy
 
             if hit && useScores then
-                let td = int ttDepth.[slot]
+                let td = int e.Depth
 
                 if td = depth || (td > depth && not exactDepthOnly) then
-                    let v = Searcher.FromTT(ttVal.[slot], ply)
+                    let v = Searcher.FromTT(e.Val, ply)
 
-                    match ttFlag.[slot] with
+                    match e.Flag with
                     | 1uy -> cut <- v
                     | 2uy when v >= beta -> cut <- v
                     | 3uy when v <= alpha -> cut <- v
                     | _ -> ()
 
             if Double.IsNaN cut && nm > 1 then
-                this.Order(mine, 0, nm, histMe, myHead0, (if hit then int ttMove.[slot] else -1))
+                this.Order(mine, 0, nm, histMe, myHead0, (if hit then int e.Move else -1))
 
         if not (Double.IsNaN cut) then cut else
 
@@ -336,18 +344,17 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         if ordering && not aborted && ply > 0 then
             // Same position: keep the deeper result (it may come from pondering, i.e. an older search).
             // Other position: keep the deeper entry of the current search, entries of older searches can go.
-            let keep =
-                ttFlag.[slot] <> 0uy
-                && depth < int ttDepth.[slot]
-                && (ttKey.[slot] = hash || ttAge.[slot] = age)
+            let e = &tt.[slot]
+            let check = uint32 (hash >>> 32)
+            let keep = e.Flag <> 0uy && depth < int e.Depth && (e.Check = check || e.Age = age)
 
             if not keep then
-                ttKey.[slot] <- hash
-                ttVal.[slot] <- Searcher.ToTT(best, ply)
-                ttDepth.[slot] <- byte depth
-                ttFlag.[slot] <- (if best <= alpha then 3uy elif best >= beta then 2uy else 1uy)
-                ttMove.[slot] <- byte mine.[bestI]
-                ttAge.[slot] <- age
+                e.Check <- check
+                e.Val <- Searcher.ToTT(best, ply)
+                e.Depth <- byte depth
+                e.Flag <- (if best <= alpha then 3uy elif best >= beta then 2uy else 1uy)
+                e.Move <- byte mine.[bestI]
+                e.Age <- age
 
         best
 

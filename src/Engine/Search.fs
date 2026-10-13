@@ -106,13 +106,15 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
     /// scalar BFS because its variable shifts are branchy, the hand-split version is what makes this pay off.
     member _.VoronoiBits(b: Board) =
         let n = b.NumSnakes
-        let mutable blLo = 0UL
-        let mutable blHi = 0UL
         let mutable onLo = 0UL
         let mutable onHi = 0UL
         let mutable twLo = 0UL
         let mutable twHi = 0UL
         let mutable maxLen = 0
+
+        // Every living segment, from the board's incrementally kept bitboard
+        let mutable blLo = b.OccLo
+        let mutable blHi = b.OccHi
 
         for s in 0 .. n - 1 do
             area.[s] <- 0
@@ -123,10 +125,6 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
             if b.Alive s then
                 let len = b.Length s
                 if len > maxLen then maxLen <- len
-
-                for k in 0 .. len - 1 do
-                    let c = b.Body(s, k)
-                    if c < 64 then blLo <- blLo ||| (1UL <<< c) else blHi <- blHi ||| (1UL <<< (c - 64))
 
                 let h = b.Head s
                 let hl = if h < 64 then 1UL <<< h else 0UL
@@ -147,12 +145,8 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
         frHi.[n] <- twHi
         let mutable rLo = onLo
         let mutable rHi = onHi
-        let mutable fdLo = 0UL
-        let mutable fdHi = 0UL
-
-        for c in 0 .. cells - 1 do
-            if b.IsFood c then
-                if c < 64 then fdLo <- fdLo ||| (1UL <<< c) else fdHi <- fdHi ||| (1UL <<< (c - 64))
+        let fdLo = b.FoodLo
+        let fdHi = b.FoodHi
 
         let w = w1
         let iw = 64 - w1

@@ -163,7 +163,7 @@ let ``incremental hash matches a from-scratch hash`` () =
     let rng = System.Random(11)
     let mutable steps = 0
 
-    for g in 1..400 do
+    for g in 1..400 do // also checks the occupancy/food bitboards
         let b = Board(geo, 4)
         // Mix of start lengths (1 and 3) so the length-1 path is covered too
         for x, y in [ (1, 1); (9, 9); (1, 9); (9, 1) ] do
@@ -192,6 +192,9 @@ let ``incremental hash matches a from-scratch hash`` () =
             if rng.Next 100 < 5 then b.SetFood(rng.Next geo.Cells, false)
             Assert.Equal(b.ComputeHash(), b.Hash)
             Assert.Equal(b.Hash, b.Clone().Hash)
+            let bits f = Seq.fold (fun (lo, hi) c -> if f c then (if c < 64 then lo ||| (1UL <<< c), hi else lo, hi ||| (1UL <<< (c - 64))) else lo, hi) (0UL, 0UL) (seq { 0 .. geo.Cells - 1 })
+            Assert.Equal((b.OccLo, b.OccHi), bits (fun c -> b.Occupancy c > 0))
+            Assert.Equal((b.FoodLo, b.FoodHi), bits b.IsFood)
             steps <- steps + 1
 
     Assert.True(steps > 10_000)
