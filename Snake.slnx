@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/bench/">
+    <Project Path="bench/Bench/Bench.fsproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Engine/Engine.fsproj" />
+    <Project Path="src/Server/Server.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Engine.Tests/Engine.Tests.fsproj" />
+  </Folder>
+</Solution>

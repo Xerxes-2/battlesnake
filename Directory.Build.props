@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>disable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+    <WarnOn>3390;$(WarnOn)</WarnOn>
+  </PropertyGroup>
+</Project>
