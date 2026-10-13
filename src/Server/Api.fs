@@ -64,8 +64,8 @@ let info =
     {| apiversion = "1"
        author = "xerxes2"
        color = "#7b2ff7"
-       head = "default"
-       tail = "default"
+       head = "fang"
+       tail = "bolt"
        version = version |}
 
 let private geometries = ConcurrentDictionary<struct (int * int), Geometry>()
