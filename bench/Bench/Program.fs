@@ -105,8 +105,59 @@ let searchBench (positions: Board[]) (ms: float) (rounds: int) =
 
     printfn "%-28s %12.0f nodes/s   avg depth %.2f over %d searches" $"search {ms}ms" (float nodes / sw.Elapsed.TotalSeconds) (float depth / float n) n
 
+/// Mid-game positions with n snakes from semi-random play.
+let mixedPositions (n: int) (count: int) =
+    let rng = Random(9)
+    let res = ResizeArray<Board>()
+    let starts = [| (1, 1); (9, 9); (1, 9); (9, 1) |]
+
+    while res.Count < count do
+        let b = Board(geo, n)
+
+        for i in 0 .. n - 1 do
+            let c = geo.Cell starts.[i]
+            b.AddSnake(100, [| c; c; c |]) |> ignore
+
+        b.SetFood(geo.Cell(5, 5), true)
+        let moves = Array.zeroCreate<Dir> n
+
+        while b.AliveCount >= 2 && b.Turn < 90 && res.Count < count do
+            for s in 0 .. n - 1 do
+                moves.[s] <- enum<Dir> (rng.Next 4)
+
+                for _ in 1..4 do
+                    let nb = geo.Neighbor(b.Head s, moves.[s])
+                    if nb < 0 || b.Occupancy nb > 0 then moves.[s] <- enum<Dir> (rng.Next 4)
+
+            b.Step moves
+            if rng.Next 100 < 20 then b.SetFood(rng.Next geo.Cells, true)
+            if b.Turn >= 15 && b.Turn % 12 = 0 && b.Alive 0 && b.AliveCount >= 2 then res.Add(b.Clone())
+
+    res.ToArray()
+
+/// Machine-independent: total nodes to complete each depth, plain fixed order vs move ordering.
+let orderBench () =
+    for n, label, depths in [ 2, "duel", [ 5; 7; 9 ]; 4, "4 snakes", [ 4; 5; 6 ] ] do
+        let ps = mixedPositions n 40
+
+        for d in depths do
+            let total o =
+                ps
+                |> Array.sumBy (fun b ->
+                    let sr = Searcher(geo, n, Weights.Standard)
+                    sr.Ordering <- o
+                    sr.MaxDepth <- d
+                    (sr.SearchFor(b, 0, 600_000.0)).Nodes)
+
+            let a, b = total false, total true
+            printfn "%-9s depth %d: plain %11d  ordered %11d  (%.2fx fewer)" label d a b (float a / float b)
+
 [<EntryPoint>]
 let main argv =
+    if argv |> Array.contains "order" then
+        orderBench ()
+        exit 0
+
     if argv |> Array.contains "search" then
         let positions = samplePositions 32
         searchBench positions 50.0 1 // warm-up

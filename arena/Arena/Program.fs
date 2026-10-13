@@ -4,7 +4,7 @@
 ///   Arena match <botA> <botB> [--mode duel|standard] [--games N] [--par P] [--seed S]
 ///   Arena tune  [--mode duel|standard] [--nodes N] [--iters N] [--batch B] [--from weights] [--par P]
 ///
-///   bot:  base | search:<ms> | nodes:<n>   optionally followed by @<weights>
+///   bot:  base | search:<ms> | nodes:<n> | plain:<n> (nodes without move ordering)   optionally followed by @<weights>
 ///   weights: "name=value,..." or a path to a file in that format (see Weights.Names)
 module Snake.Arena.Program
 
@@ -32,6 +32,12 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
         let sr = Searcher(geo, maxSnakes, w)
         sr.NodeLimit <- int64 n
         // Generous deadline: the node limit is what stops the search
+        fun b s -> sr.SearchFor(b, s, 10_000.0).Move
+    | [| "plain"; n |] ->
+        // nodes:<n> without move ordering, for A/B
+        let sr = Searcher(geo, maxSnakes, w)
+        sr.NodeLimit <- int64 n
+        sr.Ordering <- false
         fun b s -> sr.SearchFor(b, s, 10_000.0).Move
     | _ -> failwith $"unknown bot {spec}"
 

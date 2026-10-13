@@ -34,6 +34,25 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
     let tmp = Array.zeroCreate<Dir> 4
     let rootScore = Array.zeroCreate<float> 4
 
+    // Move ordering. None of this changes the search result, only how early cut-offs happen.
+    // Hint table: position hash -> my best move there. Positions recur on every iteration of iterative
+    // deepening and, partly, on the next turn; a collision only costs ordering, never correctness.
+    static let ttBits = 18
+    let ttMask = (1 <<< ttBits) - 1
+    let ttKey = Array.zeroCreate<uint64> (1 <<< ttBits)
+    let ttMove = Array.zeroCreate<byte> (1 <<< ttBits)
+    let zrng = Random(12345)
+    let z () = uint64 (zrng.NextInt64()) ^^^ (uint64 (zrng.NextInt64()) <<< 1)
+    let zHead = Array.init (maxSnakes * geo.Cells) (fun _ -> z ())
+    let zBody = Array.init (maxSnakes * geo.Cells) (fun _ -> z ())
+    let zFood = Array.init geo.Cells (fun _ -> z ())
+    // History: (head cell, dir) -> how often that move was best / caused a cut-off, mine and the opponents' apart
+    let histMe = Array.zeroCreate<int> (geo.Cells * 4)
+    let histOpp = Array.zeroCreate<int> (geo.Cells * 4)
+    let key = Array.zeroCreate<int> 4
+    let mutable ordering = true
+    let mutable maxDepth = maxPly
+
     let mutable me = 0
     let mutable deadline = 0L
     let mutable nodes = 0L
@@ -47,6 +66,57 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         and set v = nodeLimit <- v
 
     new(geo, maxSnakes) = Searcher(geo, maxSnakes, Weights.Default)
+
+    /// Move ordering on/off (off = the plain fixed order; for tests and A/B comparisons).
+    member _.Ordering
+        with get () = ordering
+        and set v = ordering <- v
+
+    /// Deepest iteration to run (for fixed-depth tests).
+    member _.MaxDepth
+        with get () = maxDepth
+        and set v = maxDepth <- v
+
+    /// Forget hints and history (e.g. a new game).
+    member _.Clear() =
+        Array.Clear ttKey
+        Array.Clear histMe
+        Array.Clear histOpp
+
+    member private _.Hash(b: Board) =
+        let cells = geo.Cells
+        let mutable h = 0UL
+
+        for s in 0 .. b.NumSnakes - 1 do
+            if b.Alive s then
+                h <- h ^^^ zHead.[s * cells + b.Head s]
+
+                for k in 1 .. b.Length s - 1 do
+                    h <- h ^^^ zBody.[s * cells + b.Body(s, k)]
+
+        for c in 0 .. cells - 1 do
+            if b.IsFood c then h <- h ^^^ zFood.[c]
+
+        // Never 0, so an empty slot cannot match
+        h ||| 1UL
+
+    /// Sorts dst.[off .. off+n-1] by descending hist.[head*4+dir], with `first` (if present) in front.
+    member private _.Order(dst: Dir[], off: int, n: int, hist: int[], head: int, first: int) =
+        for i in 0 .. n - 1 do
+            let d = int dst.[off + i]
+            key.[i] <- if d = first then Int32.MaxValue else hist.[head * 4 + d]
+
+        for i in 1 .. n - 1 do
+            let k, m = key.[i], dst.[off + i]
+            let mutable j = i - 1
+
+            while j >= 0 && key.[j] < k do
+                key.[j + 1] <- key.[j]
+                dst.[off + j + 1] <- dst.[off + j]
+                j <- j - 1
+
+            key.[j + 1] <- k
+            dst.[off + j + 1] <- m
 
     /// A cell is blocked next turn if a body segment will still be there: anything except a tail
     /// that is about to move (a tail stacked after eating has occupancy 2 and stays).
@@ -125,6 +195,15 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         let mv = moves.[ply]
         let mine = myMoves.[ply]
         let nm = if ply = 0 then nMine else this.Gen(b, me, mine, 0)
+        let myHead0 = b.Head me
+        let mutable hash = 0UL
+        let mutable slot = 0
+
+        if ordering && ply > 0 then
+            hash <- this.Hash b
+            slot <- int hash &&& ttMask
+            let hint = if ttKey.[slot] = hash then int ttMove.[slot] else -1
+            if nm > 1 then this.Order(mine, 0, nm, histMe, myHead0, hint)
 
         // Opponents: adversarial if their head can meet mine within the remaining plies
         let myHead = b.Head me
@@ -142,6 +221,7 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
                 if dist <= 2 * depth then
                     advs.[na] <- s
                     ac.[na] <- this.Gen(b, s, am, na * 4)
+                    if ordering && ac.[na] > 1 then this.Order(am, na * 4, ac.[na], histOpp, h, -1)
                     na <- na + 1
                 else
                     mv.[s] <- this.Default(b, s)
@@ -149,6 +229,7 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         let od = odo.[ply]
         let child = boards.[ply + 1]
         let mutable best = Double.NegativeInfinity
+        let mutable bestI = 0
         let mutable i = 0
 
         while i < nm && not aborted do
@@ -181,7 +262,13 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
                 if v < worst then worst <- v
 
                 if worst <= a || aborted then
-                    // This move cannot beat what we already have
+                    // This move cannot beat what we already have; credit the opponents' refutation
+                    if ordering && not aborted && depth > 1 then
+                        for j in 0 .. na - 1 do
+                            let s = advs.[j]
+                            let i4 = b.Head s * 4 + int mv.[s]
+                            histOpp.[i4] <- histOpp.[i4] + depth * depth
+
                     fin <- true
                 else
                     let mutable j = 0
@@ -200,10 +287,21 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
 
             if not aborted then
                 if ply = 0 then rootScore.[i] <- worst
-                if worst > best then best <- worst
+                if worst > best then
+                    best <- worst
+                    bestI <- i
 
                 if best >= beta then i <- nm // cut-off
                 else i <- i + 1
+
+        if ordering && not aborted && nm > 1 then
+            let d = mine.[bestI]
+            let i4 = myHead0 * 4 + int d
+            histMe.[i4] <- histMe.[i4] + depth * depth
+
+            if ply > 0 then
+                ttKey.[slot] <- hash
+                ttMove.[slot] <- byte d
 
         best
 
@@ -214,6 +312,12 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         nodes <- 0L
         aborted <- false
         boards.[0].CopyFrom root
+
+        // Old history still says something about this game, but recent results should dominate
+        for i in 0 .. histMe.Length - 1 do
+            histMe.[i] <- histMe.[i] >>> 2
+            histOpp.[i] <- histOpp.[i] >>> 2
+
         let mine = myMoves.[0]
         let nm = this.Gen(boards.[0], me, mine, 0)
         let mutable result = { Move = mine.[0]; Depth = 0; Score = 0.0; Nodes = 0L }
@@ -222,7 +326,7 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
             let mutable depth = 1
             let mutable fin = false
 
-            while not fin && depth <= maxPly do
+            while not fin && depth <= min maxPly maxDepth do
                 for i in 0 .. nm - 1 do
                     rootScore.[i] <- Double.NegativeInfinity
 
