@@ -40,6 +40,11 @@ let warmup () =
 
 [<EntryPoint>]
 let main args =
+    // Each /move blocks its thread for the whole search (~260 ms). The pool starts with one thread per core and
+    // adds more only slowly, so with more concurrent games than cores a request waited for a thread before its
+    // clock started (measured on the 4-core A1: 6+ concurrent games gave 516-766 ms responses). With threads
+    // available up front every request starts at once; the OS shares the cores and each search still stops on time.
+    Threading.ThreadPool.GetMinThreads() |> fun (_, io) -> Threading.ThreadPool.SetMinThreads(64, io) |> ignore
     let builder = WebApplication.CreateSlimBuilder(args)
     // In code rather than appsettings.json: the Nix package runs without a content root next to the binary,
     // and per-request framework logs would double the journal for no information.
