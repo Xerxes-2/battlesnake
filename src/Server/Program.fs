@@ -38,6 +38,9 @@ let warmup () =
 [<EntryPoint>]
 let main args =
     let builder = WebApplication.CreateSlimBuilder(args)
+    // In code rather than appsettings.json: the Nix package runs without a content root next to the binary,
+    // and per-request framework logs would double the journal for no information.
+    builder.Logging.AddFilter("Microsoft", LogLevel.Warning) |> ignore
     let app = builder.Build()
     let log = app.Logger
     log.LogInformation("runtime {rt}, warmup {ms:F0} ms", Runtime.InteropServices.RuntimeInformation.FrameworkDescription, warmup ())
