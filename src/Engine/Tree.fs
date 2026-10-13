@@ -18,12 +18,12 @@ type SearchInfo =
 /// plies are searched adversarially; far-away snakes play a cheap default move, so 4-snake games still get depth.
 /// All boards and move buffers are preallocated per ply; a search does not allocate.
 [<Sealed>]
-type Searcher(geo: Geometry, maxSnakes: int) =
+type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
     static let maxPly = 64
     static let win = 1e6
     static let checkMask = 255L
 
-    let analyzer = Analyzer(geo, maxSnakes)
+    let analyzer = Analyzer(geo, maxSnakes, weights)
     let boards = Array.init (maxPly + 2) (fun _ -> Board(geo, maxSnakes))
     let moves = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<Dir> maxSnakes)
     let myMoves = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<Dir> 4)
@@ -38,6 +38,15 @@ type Searcher(geo: Geometry, maxSnakes: int) =
     let mutable deadline = 0L
     let mutable nodes = 0L
     let mutable aborted = false
+    let mutable nodeLimit = 0L
+
+    /// Stop after this many nodes as well as at the deadline (0 = no limit). Makes self-play deterministic
+    /// and independent of how loaded the machine is.
+    member _.NodeLimit
+        with get () = nodeLimit
+        and set v = nodeLimit <- v
+
+    new(geo, maxSnakes) = Searcher(geo, maxSnakes, Weights.Default)
 
     /// A cell is blocked next turn if a body segment will still be there: anything except a tail
     /// that is about to move (a tail stacked after eating has occupancy 2 and stays).
@@ -105,7 +114,8 @@ type Searcher(geo: Geometry, maxSnakes: int) =
         best
 
     member private _.CheckTime() =
-        if (nodes &&& checkMask) = 0L && Stopwatch.GetTimestamp() > deadline then
+        if (nodeLimit > 0L && nodes >= nodeLimit)
+           || ((nodes &&& checkMask) = 0L && Stopwatch.GetTimestamp() > deadline) then
             aborted <- true
 
     /// Value of boards.[ply] for me with `depth` plies left, inside the window (alpha, beta).

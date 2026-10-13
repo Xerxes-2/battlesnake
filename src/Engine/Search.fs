@@ -2,12 +2,62 @@ namespace Snake.Engine
 
 open System
 
+/// Evaluation weights. Kept as a flat array so the tuner can perturb them generically; the names are the
+/// stable interface (weight files, logs). Defaults are the hand-picked starting point.
+[<Sealed>]
+type Weights(values: float[]) =
+    static let names =
+        [| "area"; "oppArea"; "len"; "lenCap"; "trapped"; "starve"; "noFoodHp"; "noFood"
+           "hungryHp"; "foodHungry"; "foodBehind"; "foodAhead"; "leadLen" |]
+
+    static let defaults = [| 10.0; 4.0; 30.0; 4.0; 50.0; 5000.0; 30.0; 10.0; 30.0; 8.0; 4.0; 1.0; 2.0 |]
+
+    static member Names = names
+    static member Default = Weights(Array.copy defaults)
+    /// Tuned by `Arena tune --mode duel --nodes 5000` (SPSA, ~19k games); copy of tune/weights-duel.txt.
+    /// Area and oppArea are nearly collinear 1v1 (they sum to roughly the free board), so their split is arbitrary.
+    static member val Duel = Weights.Parse "area=0.726,oppArea=1.017,len=72.235,lenCap=5.935,trapped=37.321,starve=3635.142,noFoodHp=35.183,noFood=9.555,hungryHp=41.814,foodHungry=8.704,foodBehind=4.158,foodAhead=0.414,leadLen=1.4"
+    /// Tuned by `Arena tune --mode standard --nodes 5000` (SPSA, ~10k games); copy of tune/weights-standard.txt
+    static member val Standard = Weights.Parse "area=2.616,oppArea=0.599,len=60.101,lenCap=5.895,trapped=1.078,starve=5854.651,noFoodHp=23.906,noFood=10.768,hungryHp=27.447,foodHungry=9.451,foodBehind=2.741,foodAhead=2.194,leadLen=3.089"
+    member _.Values = values
+    member _.Area = values.[0]
+    member _.OppArea = values.[1]
+    member _.Len = values.[2]
+    member _.LenCap = values.[3]
+    member _.Trapped = values.[4]
+    member _.Starve = values.[5]
+    member _.NoFoodHp = values.[6]
+    member _.NoFood = values.[7]
+    member _.HungryHp = values.[8]
+    member _.FoodHungry = values.[9]
+    member _.FoodBehind = values.[10]
+    member _.FoodAhead = values.[11]
+    member _.LeadLen = values.[12]
+
+    /// "name=value,name=value" (one per line also works); unknown names are an error, missing ones keep defaults.
+    static member Parse(text: string) =
+        let v = Array.copy defaults
+
+        for part in text.Split([| ','; '\n'; ';' |], StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries) do
+            match part.Split('=') with
+            | [| k; x |] ->
+                match Array.tryFindIndex ((=) (k.Trim())) names with
+                | Some i -> v.[i] <- Double.Parse(x.Trim(), Globalization.CultureInfo.InvariantCulture)
+                | None -> failwith $"unknown weight {k}"
+            | _ -> failwith $"bad weight entry {part}"
+
+        Weights v
+
+    override _.ToString() =
+        Array.map2 (fun (n: string) (x: float) -> n + "=" + x.ToString("0.###", Globalization.CultureInfo.InvariantCulture)) names values
+        |> String.concat ","
+
 /// Board analysis: Voronoi territory that accounts for when bodies vacate.
 /// The body segment at index k (counting from the head) on a snake of length L leaves after L-k turns.
 /// So a cell is only passable once the arrival distance d >= its vacate time.
 /// All buffers are preallocated, so evaluation does not allocate.
 [<Sealed>]
-type Analyzer(geo: Geometry, maxSnakes: int) =
+type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
     let cells = geo.Cells
     let dist = Array.zeroCreate<int> cells
     /// -1 unreached, -2 reached by several snakes at the same time (contested), otherwise the snake index
@@ -16,6 +66,8 @@ type Analyzer(geo: Geometry, maxSnakes: int) =
     let queue = Array.zeroCreate<int> cells
     let area = Array.zeroCreate<int> maxSnakes
     let nearestFood = Array.zeroCreate<int> maxSnakes
+
+    new(geo, maxSnakes) = Analyzer(geo, maxSnakes, Weights.Default)
 
     member _.Area(s: int) = area.[s]
     /// Distance to the nearest food inside the snake's own territory; Int32.MaxValue when there is none.
@@ -109,28 +161,29 @@ type Analyzer(geo: Geometry, maxSnakes: int) =
                         maxOppArea <- max maxOppArea area.[s]
                         maxOppLen <- max maxOppLen (b.Length s)
 
-                let lenDiff = if others = 0 then 0 else Math.Clamp(myLen - maxOppLen, -4, 4)
+                let cap = int w.LenCap
+                let lenDiff = if others = 0 then 0 else Math.Clamp(myLen - maxOppLen, -cap, cap)
                 let myArea = area.[me]
-                let mutable score = 10.0 * float myArea - 4.0 * float maxOppArea + 30.0 * float lenDiff
+                let mutable score = w.Area * float myArea - w.OppArea * float maxOppArea + w.Len * float lenDiff
 
                 // Not enough territory to hold our own body: we will most likely get trapped
                 if myArea < myLen then
-                    score <- score - 50.0 * float (myLen - myArea)
+                    score <- score - w.Trapped * float (myLen - myArea)
 
                 let hp = b.Health me
                 let nf = nearestFood.[me]
 
                 if nf = Int32.MaxValue then
-                    if hp < 30 then score <- score - 10.0 * float (30 - hp)
+                    if float hp < w.NoFoodHp then score <- score - w.NoFood * (w.NoFoodHp - float hp)
                 else
-                    if nf >= hp then score <- score - 5000.0
+                    if nf >= hp then score <- score - w.Starve
 
-                    let w =
-                        if hp < 30 then 8.0
-                        elif lenDiff < 2 then 4.0
-                        else 1.0
+                    let fw =
+                        if float hp < w.HungryHp then w.FoodHungry
+                        elif float lenDiff < w.LeadLen then w.FoodBehind
+                        else w.FoodAhead
 
-                    score <- score - w * float nf
+                    score <- score - fw * float nf
 
                 score
 

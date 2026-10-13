@@ -1,0 +1,13 @@
+area=0.726
+oppArea=1.017
+len=72.235
+lenCap=5.935
+trapped=37.321
+starve=3635.142
+noFoodHp=35.183
+noFood=9.555
+hungryHp=41.814
+foodHungry=8.704
+foodBehind=4.158
+foodAhead=0.414
+leadLen=1.4

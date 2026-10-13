@@ -25,7 +25,7 @@ let private envFloat name (dflt: float) =
 /// Network estimate before any measurement: a fresh TCP connection Sydney <-> Oregon is ~2 x 165ms.
 let firstTurnNet = envFloat "SNAKE_FIRST_NET_MS" 330.0
 /// Covers GC, scheduling jitter and the time between our clock stopping and the bytes leaving the box.
-let margin = envFloat "SNAKE_MARGIN_MS" 60.0
+let margin = envFloat "SNAKE_MARGIN_MS" 80.0
 
 /// Search time in milliseconds for this turn.
 let budget (gameId: string) (timeout: int) (latency: string) =
