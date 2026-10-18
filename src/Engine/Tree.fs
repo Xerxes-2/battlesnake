@@ -20,19 +20,31 @@ type SearchInfo =
 /// makes head-on collisions and cut-offs safe). Only opponents whose head can reach mine within the remaining
 /// plies are searched adversarially; far-away snakes play a cheap default move, so 4-snake games still get depth.
 /// All boards and move buffers are preallocated per ply; a search does not allocate.
-/// Transposition table entry. The slot index is the hash's low bits; Check holds its high 32 bits.
+/// Transposition table entry, 16 bytes. The slot index is the hash's low bits. Data is the score's bits;
+/// Key = meta ^^^ Data, meta = check (hash high 32 bits) << 32 | depth << 24 | flag << 16 | move << 8 | age,
+/// flag 0 none, 1 exact, 2 lower bound, 3 upper bound. The XOR makes a torn entry (two threads writing the same
+/// slot at once, possible since the table is shared without locks) fail the check instead of mixing fields.
 [<Struct; NoEquality; NoComparison>]
 type TTEntry =
-    val mutable Val: float
-    val mutable Check: uint32
-    val mutable Depth: byte
-    /// 0 none, 1 exact, 2 lower bound, 3 upper bound
-    val mutable Flag: byte
-    val mutable Move: byte
-    val mutable Age: byte
+    val mutable Data: uint64
+    val mutable Key: uint64
+
+/// A transposition table, shareable by several Searchers (Lazy SMP). Age counts searches, for replacement.
+[<Sealed; AllowNullLiteral>]
+type TTable(bits: int) =
+    let entries = Array.zeroCreate<TTEntry> (1 <<< bits)
+    let mutable age = 0uy
+    member _.Entries = entries
+    member _.Mask = (1 <<< bits) - 1
+
+    member _.Age
+        with get () = age
+        and set v = age <- v
+
+    member _.Clear() = Array.Clear entries
 
 [<Sealed>]
-type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
+type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
     static let maxPly = 64
     static let win = 1e6
     static let likelyWin = 1e5
@@ -54,11 +66,19 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
     // next turn and during pondering. The hash covers bodies, lengths, health, food and hazards, i.e. everything
     // the value depends on given (depth, me, weights), which are fixed per Searcher.
     static let ttBits = 19
-    let ttMask = (1 <<< ttBits) - 1
+    // A shared table is aged by its owner (ParallelSearcher); our own we age per Search
+    let ownTable = isNull shared
+    let table = if ownTable then TTable(ttBits) else shared
+    let ttMask = table.Mask
     // One 16-byte entry per slot so a probe touches a single cache line (separate arrays per field cost up to six
     // misses per probe, which showed up on the A1's small caches).
-    let tt = Array.zeroCreate<TTEntry> (1 <<< ttBits)
+    let tt = table.Entries
     let mutable age = 0uy
+    // Lazy SMP helper index (0 = main). Odd helpers start deepening at depth 2 so threads spread over depths.
+    let mutable helper = 0
+    // How helpers spread over depths: 0 = odd helpers start at depth 2 only; 2 = Stockfish-style depth skipping.
+    // A1, 250 ms, 4 threads: +0.25 ply (0) vs +0.53 ply (2); 1 (rotating move order near the root) was worse.
+    let mutable diversity = 2
     let mutable useScores = true
     let mutable exactDepthOnly = false
     let mutable stopRequested = false
@@ -89,7 +109,20 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         with get () = soundProofs
         and set v = soundProofs <- v
 
-    new(geo, maxSnakes) = Searcher(geo, maxSnakes, Weights.Default)
+    new(geo, maxSnakes, weights) = Searcher(geo, maxSnakes, weights, null)
+    new(geo, maxSnakes) = Searcher(geo, maxSnakes, Weights.Default, null)
+
+    static member TTBits = ttBits
+    static member val internal SkipSize = [| 1; 1; 2; 2; 2; 2; 3; 3; 3; 3; 3; 3; 4; 4; 4; 4; 4; 4; 4; 4 |]
+    static member val internal SkipPhase = [| 0; 1; 0; 1; 2; 3; 0; 1; 2; 3; 4; 5; 0; 1; 2; 3; 4; 5; 6; 7 |]
+
+    member _.Helper
+        with get () = helper
+        and set v = helper <- v
+
+    member _.Diversity
+        with get () = diversity
+        and set v = diversity <- v
 
     /// Move ordering on/off (off = the plain fixed order; for tests and A/B comparisons).
     member _.Ordering
@@ -116,7 +149,7 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
 
     /// Forget hints and history (e.g. a new game).
     member _.Clear() =
-        Array.Clear tt
+        table.Clear()
         Array.Clear histMe
         Array.Clear histOpp
 
@@ -240,22 +273,25 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
             hash <- this.Hash b
             slot <- int hash &&& ttMask
             let e = &tt.[slot]
-            let hit = e.Check = uint32 (hash >>> 32) && e.Flag <> 0uy
+            let data = e.Data
+            let meta = e.Key ^^^ data
+            let flag = byte (meta >>> 16)
+            let hit = uint32 (meta >>> 32) = uint32 (hash >>> 32) && flag <> 0uy
 
             if hit && useScores && not relaxed then
-                let td = int e.Depth
+                let td = int (byte (meta >>> 24))
 
                 if td = depth || (td > depth && not exactDepthOnly) then
-                    let v = Searcher.FromTT(e.Val, ply)
+                    let v = Searcher.FromTT(BitConverter.UInt64BitsToDouble data, ply)
 
-                    match e.Flag with
+                    match flag with
                     | 1uy -> cut <- v
                     | 2uy when v >= beta -> cut <- v
                     | 3uy when v <= alpha -> cut <- v
                     | _ -> ()
 
             if Double.IsNaN cut && nm > 1 then
-                this.Order(mine, 0, nm, histMe, myHead0, (if hit then int e.Move else -1))
+                this.Order(mine, 0, nm, histMe, myHead0, (if hit then int (byte (meta >>> 8)) else -1))
 
         if not (Double.IsNaN cut) then cut else
 
@@ -383,15 +419,26 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
             // Other position: keep the deeper entry of the current search, entries of older searches can go.
             let e = &tt.[slot]
             let check = uint32 (hash >>> 32)
-            let keep = e.Flag <> 0uy && depth < int e.Depth && (e.Check = check || e.Age = age)
+            let old = e.Key ^^^ e.Data
+
+            let keep =
+                byte (old >>> 16) <> 0uy
+                && depth < int (byte (old >>> 24))
+                && (uint32 (old >>> 32) = check || byte old = age)
 
             if not keep then
-                e.Check <- check
-                e.Val <- Searcher.ToTT(best, ply)
-                e.Depth <- byte depth
-                e.Flag <- (if best <= alpha then 3uy elif best >= beta then 2uy else 1uy)
-                e.Move <- byte mine.[bestI]
-                e.Age <- age
+                let flag = if best <= alpha then 3uy elif best >= beta then 2uy else 1uy
+                let data = BitConverter.DoubleToUInt64Bits(Searcher.ToTT(best, ply))
+
+                let meta =
+                    (uint64 check <<< 32)
+                    ||| (uint64 (byte depth) <<< 24)
+                    ||| (uint64 flag <<< 16)
+                    ||| (uint64 (byte mine.[bestI]) <<< 8)
+                    ||| uint64 age
+
+                e.Data <- data
+                e.Key <- meta ^^^ data
 
         best
 
@@ -401,10 +448,19 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
     member private this.Deepen(nm: int) : SearchInfo =
         let mine = myMoves.[0]
         let mutable result = { Move = mine.[0]; Depth = 0; Score = 0.0; Nodes = 0L; Relaxed = relaxed }
-        let mutable depth = 1
+        let mutable depth = if helper % 2 = 1 then 2 else 1
         let mutable fin = false
 
         while not fin && depth <= min maxPly maxDepth do
+          // Stockfish's skip pattern: helper i skips some depths so threads are spread over iterations
+          let skip =
+              diversity = 2 && helper > 0
+              && (let k = (helper - 1) % 20
+                  ((depth + Searcher.SkipPhase.[k]) / Searcher.SkipSize.[k]) % 2 = 1)
+
+          if skip then
+              depth <- depth + 1
+          else
             for i in 0 .. nm - 1 do
                 rootScore.[i] <- Double.NegativeInfinity
 
@@ -451,14 +507,23 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
         result
 
     member this.Search(root: Board, mySnake: int, stopAt: int64) : SearchInfo =
+        Volatile.Write(&stopRequested, false)
+        this.SearchCore(root, mySnake, stopAt)
+
+    /// Clears a pending Stop. ParallelSearcher does this before starting helpers, so a Stop that comes before a
+    /// helper got going is not lost.
+    member _.ResetStop() = Volatile.Write(&stopRequested, false)
+
+    /// Search without clearing a pending Stop.
+    member this.SearchCore(root: Board, mySnake: int, stopAt: int64) : SearchInfo =
         me <- mySnake
         deadline <- stopAt
         nodes <- 0L
         aborted <- false
         boards.[0].CopyFrom root
 
-        age <- age + 1uy
-        Volatile.Write(&stopRequested, false)
+        if ownTable then table.Age <- table.Age + 1uy
+        age <- table.Age
 
         // Old history still says something about this game, but recent results should dominate
         for i in 0 .. histMe.Length - 1 do
@@ -492,3 +557,65 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights) =
     member this.SearchFor(root: Board, mySnake: int, ms: float) =
         let stopAt = Stopwatch.GetTimestamp() + int64 (ms * float Stopwatch.Frequency / 1000.0)
         this.Search(root, mySnake, stopAt)
+
+/// Lazy SMP: `threads` Searchers share one table and search the same root at once; the helpers mostly fill the
+/// table (their cut-offs and exact scores let the main thread skip work), and the deepest finished result wins.
+/// Each Searcher keeps its own boards, history and evaluator, so nothing but the table is shared.
+[<Sealed>]
+type ParallelSearcher(geo: Geometry, maxSnakes: int, weights: Weights, threads: int) =
+    let table = TTable(Searcher.TTBits)
+
+    let workers =
+        Array.init (max 1 threads) (fun i ->
+            let s = Searcher(geo, maxSnakes, weights, table)
+            s.Helper <- i
+            s)
+
+    let results = Array.zeroCreate<SearchInfo> workers.Length
+
+    member _.Threads = workers.Length
+    member _.Main = workers.[0]
+
+    member _.Diversity
+        with get () = workers.[0].Diversity
+        and set v =
+            for w in workers do
+                w.Diversity <- v
+
+    member _.Clear() =
+        for w in workers do
+            w.Clear()
+
+    /// Searches with the main thread plus up to `helpers` extra threads (capped at Threads - 1), until `stopAt`.
+    member _.Search(root: Board, me: int, stopAt: int64, helpers: int) : SearchInfo =
+        table.Age <- table.Age + 1uy
+        let n = Math.Clamp(helpers, 0, workers.Length - 1)
+
+        if n = 0 then
+            workers.[0].Search(root, me, stopAt)
+        else
+            for i in 1..n do
+                workers.[i].ResetStop()
+
+            let tasks =
+                Array.init n (fun k ->
+                    let i = k + 1
+                    Tasks.Task.Run(fun () -> results.[i] <- workers.[i].SearchCore(root, me, stopAt)))
+
+            let main = workers.[0].Search(root, me, stopAt)
+
+            // The main thread decides when to stop (deadline or a proven result); helpers follow
+            for i in 1..n do
+                workers.[i].Stop()
+
+            Tasks.Task.WaitAll tasks
+            let mutable best = main
+            let mutable nodes = main.Nodes
+
+            for i in 1..n do
+                let r = results.[i]
+                nodes <- nodes + r.Nodes
+                // A helper that completed a deeper iteration in the same mode knows more than the main thread
+                if r.Relaxed = main.Relaxed && r.Depth > best.Depth then best <- r
+
+            { best with Nodes = nodes }

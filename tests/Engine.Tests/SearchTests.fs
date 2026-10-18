@@ -68,3 +68,26 @@ let ``reusing a persistent table keeps the result at least as deep`` () =
         Assert.Equal(first.Depth, second.Depth)
         Assert.Equal(first.Score, second.Score)
         Assert.True(second.Nodes * 3L <= first.Nodes + 50L, $"second {second.Nodes} vs first {first.Nodes}")
+
+/// Lazy SMP: legal moves, stops at the deadline, and a forced move (main thread done at once, before the helpers
+/// even started) does not leave helpers running until the deadline.
+[<Fact>]
+let ``parallel searcher stops on time and plays legal moves`` () =
+    let ps = ParallelSearcher(geo, 4, Weights.Standard, 4)
+    let ms (t: int64) = float (System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / float System.Diagnostics.Stopwatch.Frequency
+    let after (x: float) = System.Diagnostics.Stopwatch.GetTimestamp() + int64 (x * float System.Diagnostics.Stopwatch.Frequency / 1000.0)
+
+    for b in positions 21 20 do
+        let t0 = System.Diagnostics.Stopwatch.GetTimestamp()
+        let r = ps.Search(b, 0, after 30.0, 3)
+        Assert.True(ms t0 < 80.0, $"took {ms t0} ms")
+        Assert.True(geo.Neighbor(b.Head 0, r.Move) >= 0)
+
+    // Snake in the corner with its neck blocking one way: a single legal move
+    let b = Board(geo, 4)
+    b.AddSnake(100, [| geo.Cell(0, 0); geo.Cell(1, 0); geo.Cell(2, 0) |]) |> ignore
+    b.AddSnake(100, [| geo.Cell(9, 9); geo.Cell(9, 8); geo.Cell(9, 7) |]) |> ignore
+    let t0 = System.Diagnostics.Stopwatch.GetTimestamp()
+    let r = ps.Search(b, 0, after 2000.0, 3)
+    Assert.Equal(Dir.Up, r.Move)
+    Assert.True(ms t0 < 500.0, $"forced move took {ms t0} ms")

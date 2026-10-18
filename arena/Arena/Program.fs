@@ -65,6 +65,13 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
             sr.NodeLimit <- p
             count (sr.SearchFor(b, s, 10_000.0)) |> ignore
             m
+    | [| "smp"; ms; t; div |] ->
+        // Lazy SMP with t threads for ms per move
+        let ps = ParallelSearcher(geo, maxSnakes, w, int t)
+        ps.Diversity <- int div
+        fun b s ->
+            let stopAt = Diagnostics.Stopwatch.GetTimestamp() + int64 (float ms * float Diagnostics.Stopwatch.Frequency / 1000.0)
+            count (ps.Search(b, s, stopAt, int t - 1))
     | [| "legacy"; n |] ->
         // nodes:<n> with the pre-0.6.1 unsound proofs, for A/B
         let sr = Searcher(geo, maxSnakes, w)

@@ -8,12 +8,12 @@ open Microsoft.Extensions.Logging
 open Snake.Engine
 open Snake.Server.Api
 
-/// Searches until `stopAt` (a Stopwatch timestamp) with this game's persistent Searcher.
+/// Searches until `stopAt` (a Stopwatch timestamp) with this game's persistent searcher.
 let decide (gs: GameState) (stopAt: int64) =
     let b, me = toBoard gs
     // Duels and multi-snake games reward different things (e.g. length matters more 1v1), so they are tuned apart
     let w = if gs.Board.Snakes.Length = 2 then Weights.Duel else Weights.Standard
-    Sessions.withSearcher gs.Game.Id b w (fun s -> s.Search(b, me, stopAt))
+    Sessions.search gs.Game.Id b me w stopAt
 
 let msToTicks (ms: float) = int64 (ms * float Stopwatch.Frequency / 1000.0)
 
@@ -51,7 +51,7 @@ let main args =
     builder.Logging.AddFilter("Microsoft", LogLevel.Warning) |> ignore
     let app = builder.Build()
     let log = app.Logger
-    log.LogInformation("snake-server {v}, runtime {rt}, warmup {ms:F0} ms", version, Runtime.InteropServices.RuntimeInformation.FrameworkDescription, warmup ())
+    log.LogInformation("snake-server {v}, runtime {rt}, threads {th}, warmup {ms:F0} ms", version, Runtime.InteropServices.RuntimeInformation.FrameworkDescription, Sessions.threads, warmup ())
 
     app.MapGet("/", Func<obj>(fun () -> box info)) |> ignore
 

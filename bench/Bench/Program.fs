@@ -155,8 +155,37 @@ let orderBench () =
             let a, h, t = total false false, total true false, total true true
             printfn "%-9s depth %d: plain %11d  hints %11d (%.2fx)  +scores %11d (%.2fx)" label d a h (float a / float h) t (float a / float t)
 
+/// Lazy SMP at a fixed time per position: nodes/s and average completed depth for 1..threads threads.
+let smpBench (positions: Board[]) (ms: float) (threads: int) =
+    for t in 1..threads do
+        let ps = ParallelSearcher(geo, 4, Weights.Standard, t)
+        ps.Diversity <- (match Environment.GetEnvironmentVariable "SMP_DIV" with | null -> 0 | v -> int v)
+        let mutable nodes = 0L
+        let mutable depth = 0L
+        let sw = Stopwatch.StartNew()
+
+        for p in positions do
+            ps.Clear()
+            let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
+            let stopAt = Stopwatch.GetTimestamp() + int64 (ms * float Stopwatch.Frequency / 1000.0)
+            let r = ps.Search(p, me, stopAt, t - 1)
+            nodes <- nodes + r.Nodes
+            depth <- depth + int64 r.Depth
+
+        printfn "smp %d thread(s) %4.0fms   %10.0f nodes/s   avg depth %.2f" t ms (float nodes / sw.Elapsed.TotalSeconds) (float depth / float positions.Length)
+
 [<EntryPoint>]
 let main argv =
+    if argv |> Array.contains "smp" then
+        let positions = samplePositions 32
+        smpBench positions 50.0 2 // warm-up
+        let ms = argv |> Array.tryPick (fun a -> match Double.TryParse a with | true, v -> Some v | _ -> None) |> Option.defaultValue 250.0
+        let tmax = (match Environment.GetEnvironmentVariable "SMP_T" with | null -> 4 | v -> int v)
+        if tmax = 1 then
+            for m in [ ms; ms * 2.0; ms * 4.0 ] do smpBench positions m 1
+        else smpBench positions ms tmax
+        exit 0
+
     if argv |> Array.contains "order" then
         orderBench ()
         exit 0
