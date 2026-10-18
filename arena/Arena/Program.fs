@@ -65,6 +65,12 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
             sr.NodeLimit <- p
             count (sr.SearchFor(b, s, 10_000.0)) |> ignore
             m
+    | [| "legacy"; n |] ->
+        // nodes:<n> with the pre-0.6.1 unsound proofs, for A/B
+        let sr = Searcher(geo, maxSnakes, w)
+        sr.NodeLimit <- int64 n
+        sr.SoundProofs <- false
+        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
     | [| "plain"; n |] ->
         // nodes:<n> without move ordering, for A/B
         let sr = Searcher(geo, maxSnakes, w)

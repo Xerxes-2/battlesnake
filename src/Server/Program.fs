@@ -66,8 +66,8 @@ let main args =
         let ms = Stopwatch.GetElapsedTime(t0).TotalMilliseconds
         Clock.record gs.Game.Id ms
         log.LogInformation(
-            "move {game} t={turn} -> {dir} d={depth} score={score:F0} nodes={nodes} ({ms:F1}/{budget:F0} ms, net~{net:F0}, lat={lat})",
-            gs.Game.Id, gs.Turn, Dir.toApi r.Move, r.Depth, r.Score, r.Nodes, ms, budget, net, gs.You.Latency)
+            "move {game} t={turn} -> {dir} d={depth}{relaxed} score={score:F0} nodes={nodes} ({ms:F1}/{budget:F0} ms, net~{net:F0}, lat={lat})",
+            gs.Game.Id, gs.Turn, Dir.toApi r.Move, r.Depth, (if r.Relaxed then "R" else ""), r.Score, r.Nodes, ms, budget, net, gs.You.Latency)
         box {| move = Dir.toApi r.Move; shout = "" |})) |> ignore
 
     app.MapPost("/end", Func<GameState, IResult>(fun gs ->
