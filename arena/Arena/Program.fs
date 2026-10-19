@@ -72,6 +72,12 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
         fun b s ->
             let stopAt = Diagnostics.Stopwatch.GetTimestamp() + int64 (float ms * float Diagnostics.Stopwatch.Frequency / 1000.0)
             count (ps.Search(b, s, stopAt, int t - 1))
+    | [| "relaxold"; n |] ->
+        // nodes:<n> with 0.7.0's nearest-only relaxed re-search, for A/B
+        let sr = Searcher(geo, maxSnakes, w)
+        sr.NodeLimit <- int64 n
+        sr.RelaxNear <- false
+        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
     | [| "legacy"; n |] ->
         // nodes:<n> with the pre-0.6.1 unsound proofs, for A/B
         let sr = Searcher(geo, maxSnakes, w)

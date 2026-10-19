@@ -96,6 +96,9 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
     let mutable soundProofs = true
     // Re-search after a paranoid proven loss: only the nearest opponent is adversarial, no TT scores in or out
     let mutable relaxed = false
+    // Relaxed mode also keeps opponents within 2 steps adversarial (they can reach our next cell); false = 0.7.0's
+    // nearest-only, which walked into a second, equally close opponent (game 7a8e3ab9)
+    let mutable relaxNear = true
 
     /// Stop after this many nodes as well as at the deadline (0 = no limit). Makes self-play deterministic
     /// and independent of how loaded the machine is.
@@ -119,6 +122,10 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
     member _.Helper
         with get () = helper
         and set v = helper <- v
+
+    member _.RelaxNear
+        with get () = relaxNear
+        and set v = relaxNear <- v
 
     member _.Diversity
         with get () = diversity
@@ -329,7 +336,7 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
 
                 // A lone opponent is always searched: 1v1 the whole board is the fight (its space is our space),
                 // and a far opponent walking into a dead end under Default produced fake forced wins (game 60b3aa33).
-                if (not relaxed || s = nearest) && ((soundProofs && opps = 1) || dist <= 2 * depth) then
+                if (not relaxed || s = nearest || (relaxNear && dist <= 2)) && ((soundProofs && opps = 1) || dist <= 2 * depth) then
                     advs.[na] <- s
                     ac.[na] <- this.Gen(b, s, am, na * 4)
                     if ordering && ac.[na] > 1 then this.Order(am, na * 4, ac.[na], histOpp, h, -1)
