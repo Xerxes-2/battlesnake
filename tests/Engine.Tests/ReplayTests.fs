@@ -46,7 +46,7 @@ let ``no fake proven win when the duel opponent is far away`` () =
 /// Ladder game 7a8e3ab9 (died turn 88): the paranoid search saw only losses, the relaxed re-search kept just the
 /// "nearest" opponent (alexander at distance 2, picked by tie order) and moved right into (9,5), where Nathan, also
 /// at distance 2 and longer, moved too. Every opponent that can reach our next cell must stay adversarial.
-[<Fact>]
+[<Fact(Skip = "RelaxNear is off: the fix for this position cost far more on the ladder than it saved")>]
 let ``relaxed search keeps every opponent two steps away adversarial`` () =
     let geo, b = load "std-relaxed-tie-t87.json"
     let sr = Searcher(geo, 4, Weights.Standard)

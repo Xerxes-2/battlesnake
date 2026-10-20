@@ -96,9 +96,10 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
     let mutable soundProofs = true
     // Re-search after a paranoid proven loss: only the nearest opponent is adversarial, no TT scores in or out
     let mutable relaxed = false
-    // Relaxed mode also keeps opponents within 2 steps adversarial (they can reach our next cell); false = 0.7.0's
-    // nearest-only, which walked into a second, equally close opponent (game 7a8e3ab9)
-    let mutable relaxNear = true
+    // Relaxed mode also keeps opponents within 2 steps adversarial. Off: on the ladder (0.7.1) it made the relaxed
+    // re-search nearly as paranoid as the first, proving losses at depth ~4 and picking the move that dies last in
+    // the worst case; Standard deaths went from 48% to 75% of games, half of them head-on.
+    let mutable relaxNear = false
 
     /// Stop after this many nodes as well as at the deadline (0 = no limit). Makes self-play deterministic
     /// and independent of how loaded the machine is.
