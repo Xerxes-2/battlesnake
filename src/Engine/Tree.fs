@@ -590,6 +590,12 @@ type ParallelSearcher(geo: Geometry, maxSnakes: int, weights: Weights, threads: 
             for w in workers do
                 w.Diversity <- v
 
+    member _.SoundProofs
+        with get () = workers.[0].SoundProofs
+        and set v =
+            for w in workers do
+                w.SoundProofs <- v
+
     member _.Clear() =
         for w in workers do
             w.Clear()

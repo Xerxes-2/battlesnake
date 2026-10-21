@@ -56,7 +56,7 @@ let main args =
     app.MapGet("/", Func<obj>(fun () -> box info)) |> ignore
 
     app.MapPost("/start", Func<GameState, IResult>(fun gs ->
-        log.LogInformation("start {game} {ruleset} {w}x{h} snakes={n}", gs.Game.Id, gs.Game.Ruleset.Name, gs.Board.Width, gs.Board.Height, gs.Board.Snakes.Length)
+        log.LogInformation("start {game} {ruleset} {w}x{h} snakes={n} arm={arm}", gs.Game.Id, gs.Game.Ruleset.Name, gs.Board.Width, gs.Board.Height, gs.Board.Snakes.Length, (if Sessions.legacyArm gs.Game.Id gs.Board.Snakes.Length then "legacy" else "new"))
         Results.Ok())) |> ignore
 
     app.MapPost("/move", Func<GameState, obj>(fun gs ->
