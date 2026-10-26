@@ -92,10 +92,26 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
         fun b s -> count (sr.SearchFor(b, s, 10_000.0))
     | _ -> failwith $"unknown bot {spec}"
 
+/// The shipped weights for the mode (before 0.7.4 bots without @ played Weights.Default, so every A/B that
+/// didn't spell out weights compared Default-weighted bots, not what the server plays).
+let modeWeights maxSnakes = if maxSnakes = 2 then Weights.Duel else Weights.Standard
+
+/// `@...` overrides single weights on top of the mode's shipped ones (a file, or name=value pairs).
+let overrideWeights (bse: Weights) (s: string) =
+    let text = if File.Exists s then File.ReadAllText s else s
+    let v = Array.copy bse.Values
+
+    for part in text.Split([| ','; '\n'; ';' |], StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries) do
+        match part.Split('=') with
+        | [| k; x |] -> v.[Array.findIndex ((=) (k.Trim())) Weights.Names] <- float (x.Trim())
+        | _ -> failwith $"bad weight entry {part}"
+
+    Weights v
+
 let makeBot geo maxSnakes (spec: string) =
     match spec.IndexOf '@' with
-    | -1 -> makeBotW geo maxSnakes spec Weights.Default
-    | i -> makeBotW geo maxSnakes spec.[.. i - 1] (parseWeights spec.[i + 1 ..])
+    | -1 -> makeBotW geo maxSnakes spec (modeWeights maxSnakes)
+    | i -> makeBotW geo maxSnakes spec.[.. i - 1] (overrideWeights (modeWeights maxSnakes) spec.[i + 1 ..])
 
 let shuffle (rng: Random) (a: 'T[]) =
     for i in a.Length - 1 .. -1 .. 1 do
@@ -472,4 +488,5 @@ let main argv =
     | _ when argv.[0] = "reuse" -> runReuse argv
     | _ when argv.[0] = "depth" -> runDepth argv
     | _ when argv.[0] = "texel" -> Texel.run argv; 0
+    | _ when argv.[0] = "features" -> Texel.dump argv; 0
     | _ -> runMatch (Array.append [| "match" |] argv)

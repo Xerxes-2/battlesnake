@@ -13,8 +13,6 @@ open Snake.Engine
 type private Session =
     { Searchers: ConcurrentDictionary<struct (int * int * int), ParallelSearcher>
       Lock: obj
-      /// A/B arm: the 0.6.0 setup (one thread, pre-0.6.1 proofs) for this game
-      Legacy: bool
       mutable LastUsed: int64 }
 
 let private sessions = ConcurrentDictionary<string, Session>()
@@ -36,9 +34,10 @@ let private diversity =
     | true, n -> n
     | _ -> 2
 
-/// Ladder A/B (SNAKE_AB, default on): Standard games whose id starts with an even hex digit run the 0.6.0 setup,
-/// so both arms meet the same opponents at the same time. Over periods the two can't be told apart: matchmaking
-/// moved to stronger opponents just as 0.6.1/0.7 went live.
+/// Ladder A/B (SNAKE_AB, default on): Standard games whose id starts with an even hex digit play the previous
+/// Standard weights (Weights.StandardPrev), so both arms meet the same opponents at the same time. Self-play can't
+/// stand in for this (0.7.1 was neutral there and lost badly on the ladder), and over periods the arms can't be
+/// told apart because matchmaking keeps shifting.
 let private abTest = Environment.GetEnvironmentVariable "SNAKE_AB" <> "0"
 
 /// Whether a game plays the legacy arm, from its id alone so the logs and game ids can be split afterwards.
@@ -54,10 +53,9 @@ let private sweep () =
     for kv in sessions do
         if now - Volatile.Read(&kv.Value.LastUsed) > idleTicks then sessions.TryRemove kv.Key |> ignore
 
-let private make (geo: Geometry) (maxSnakes: int) (w: Weights) (n: int) (legacy: bool) =
-    let p = ParallelSearcher(geo, maxSnakes, w, (if legacy then 1 else n))
+let private make (geo: Geometry) (maxSnakes: int) (w: Weights) (n: int) =
+    let p = ParallelSearcher(geo, maxSnakes, w, n)
     p.Diversity <- diversity
-    p.SoundProofs <- not legacy
     p
 
 /// Searches with this game's ParallelSearcher for the board's size and snake count, using the cores not taken by
@@ -72,7 +70,6 @@ let search (gameId: string) (b: Board) (me: int) (w: Weights) (stopAt: int64) : 
             fun _ ->
                 { Searchers = ConcurrentDictionary()
                   Lock = obj ()
-                  Legacy = legacyArm gameId b.MaxSnakes
                   LastUsed = 0L }
         )
 
@@ -83,16 +80,16 @@ let search (gameId: string) (b: Board) (me: int) (w: Weights) (stopAt: int64) : 
     let running = Interlocked.Increment(&active)
 
     try
-        let helpers = if s.Legacy then 0 else max 0 (threads / running - 1)
+        let helpers = max 0 (threads / running - 1)
 
         if Monitor.TryEnter s.Lock then
             try
-                let p = s.Searchers.GetOrAdd(key, fun _ -> make geo b.MaxSnakes w threads s.Legacy)
+                let p = s.Searchers.GetOrAdd(key, fun _ -> make geo b.MaxSnakes w threads)
                 p.Search(b, me, stopAt, helpers)
             finally
                 Monitor.Exit s.Lock
         else
-            (make geo b.MaxSnakes w 1 s.Legacy).Search(b, me, stopAt, 0)
+            (make geo b.MaxSnakes w 1).Search(b, me, stopAt, 0)
     finally
         Interlocked.Decrement(&active) |> ignore
 

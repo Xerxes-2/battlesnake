@@ -12,7 +12,10 @@ open Snake.Server.Api
 let decide (gs: GameState) (stopAt: int64) =
     let b, me = toBoard gs
     // Duels and multi-snake games reward different things (e.g. length matters more 1v1), so they are tuned apart
-    let w = if gs.Board.Snakes.Length = 2 then Weights.Duel else Weights.Standard
+    let w =
+        if gs.Board.Snakes.Length = 2 then Weights.Duel
+        elif Sessions.legacyArm gs.Game.Id gs.Board.Snakes.Length then Weights.StandardPrev
+        else Weights.Standard
     Sessions.search gs.Game.Id b me w stopAt
 
 let msToTicks (ms: float) = int64 (ms * float Stopwatch.Frequency / 1000.0)

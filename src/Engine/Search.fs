@@ -20,7 +20,11 @@ type Weights(values: float[]) =
     /// Area and oppArea are nearly collinear 1v1 (they sum to roughly the free board), so their split is arbitrary.
     static member val Duel = Weights.Parse "area=1.973,oppArea=1.681,len=100.778,lenCap=5.506,trapped=32.391,starve=2854.777,noFoodHp=28.094,noFood=9.887,hungryHp=49.46,foodHungry=7.999,foodBehind=3.469,foodAhead=0.118,leadLen=1.259"
     /// Tuned by `Arena tune --mode standard --nodes 5000` (SPSA, ~10k games); copy of tune/weights-standard.txt
-    static member val Standard = Weights.Parse "area=2.616,oppArea=0.599,len=60.101,lenCap=5.895,trapped=1.078,starve=5854.651,noFoodHp=23.906,noFood=10.768,hungryHp=27.447,foodHungry=9.451,foodBehind=2.741,foodAhead=2.194,leadLen=3.089"
+    /// trapped 1.08 -> 10: on 610 ladder games a snake with less territory than its length dies within 10 turns
+    /// 4-20% of the time against 0.7% otherwise, yet the 5k-node SPSA had left the penalty near zero (+35 elo).
+    static member val Standard = Weights.Parse "area=2.616,oppArea=0.599,len=60.101,lenCap=5.895,trapped=10,starve=5854.651,noFoodHp=23.906,noFood=10.768,hungryHp=27.447,foodHungry=9.451,foodBehind=2.741,foodAhead=2.194,leadLen=3.089"
+    /// Before 0.7.4, kept for the ladder A/B.
+    static member val StandardPrev = Weights.Parse "area=2.616,oppArea=0.599,len=60.101,lenCap=5.895,trapped=1.078,starve=5854.651,noFoodHp=23.906,noFood=10.768,hungryHp=27.447,foodHungry=9.451,foodBehind=2.741,foodAhead=2.194,leadLen=3.089"
     member _.Values = values
     member _.Area = values.[0]
     member _.OppArea = values.[1]
