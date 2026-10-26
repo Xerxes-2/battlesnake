@@ -286,6 +286,31 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
                 if b.IsFood c && dist.[c] < nearestFood.[o] then
                     nearestFood.[o] <- dist.[c]
 
+    /// The evaluation formula on the raw features, shared with the Texel tuner (which precomputes the features once
+    /// and only re-weighs them).
+    static member Combine(w: Weights, myArea: int, maxOppArea: int, myLen: int, maxOppLen: int, others: int, hp: int, nf: int) =
+        let cap = int w.LenCap
+        let lenDiff = if others = 0 then 0 else Math.Clamp(myLen - maxOppLen, -cap, cap)
+        let mutable score = w.Area * float myArea - w.OppArea * float maxOppArea + w.Len * float lenDiff
+
+        // Not enough territory to hold our own body: we will most likely get trapped
+        if myArea < myLen then
+            score <- score - w.Trapped * float (myLen - myArea)
+
+        if nf = Int32.MaxValue then
+            if float hp < w.NoFoodHp then score <- score - w.NoFood * (w.NoFoodHp - float hp)
+        else
+            if nf >= hp then score <- score - w.Starve
+
+            let fw =
+                if float hp < w.HungryHp then w.FoodHungry
+                elif float lenDiff < w.LeadLen then w.FoodBehind
+                else w.FoodAhead
+
+            score <- score - fw * float nf
+
+        score
+
     /// Score from snake me's point of view. Death = -1e6, being the only survivor = +1e6.
     member this.Evaluate(b: Board, me: int) : float =
         if not (b.Alive me) then
@@ -310,31 +335,7 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
                         maxOppArea <- max maxOppArea area.[s]
                         maxOppLen <- max maxOppLen (b.Length s)
 
-                let cap = int w.LenCap
-                let lenDiff = if others = 0 then 0 else Math.Clamp(myLen - maxOppLen, -cap, cap)
-                let myArea = area.[me]
-                let mutable score = w.Area * float myArea - w.OppArea * float maxOppArea + w.Len * float lenDiff
-
-                // Not enough territory to hold our own body: we will most likely get trapped
-                if myArea < myLen then
-                    score <- score - w.Trapped * float (myLen - myArea)
-
-                let hp = b.Health me
-                let nf = nearestFood.[me]
-
-                if nf = Int32.MaxValue then
-                    if float hp < w.NoFoodHp then score <- score - w.NoFood * (w.NoFoodHp - float hp)
-                else
-                    if nf >= hp then score <- score - w.Starve
-
-                    let fw =
-                        if float hp < w.HungryHp then w.FoodHungry
-                        elif float lenDiff < w.LeadLen then w.FoodBehind
-                        else w.FoodAhead
-
-                    score <- score - fw * float nf
-
-                score
+                Analyzer.Combine(w, area.[me], maxOppArea, myLen, maxOppLen, others, b.Health me, nearestFood.[me])
 
 /// Baseline policy: one-ply paranoid search. For each of my moves, enumerate every combination of opponent replies
 /// (excluding off-board moves and turning back onto the neck) and take the worst case; break ties on the average.

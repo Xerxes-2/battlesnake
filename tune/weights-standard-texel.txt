@@ -1,0 +1,1 @@
+area=9.632,oppArea=1.063E-05,len=77.64,lenCap=4.912,trapped=3.306E-05,starve=116.7,noFoodHp=153.2,noFood=2.211,hungryHp=7.66,foodHungry=16.33,foodBehind=0.0008994,foodAhead=15.85,leadLen=2.574

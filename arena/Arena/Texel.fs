@@ -1,0 +1,212 @@
+/// Texel-style tuning on ladder games: fit the evaluation weights so that sigmoid(eval / K) predicts how each snake
+/// actually finished. Self-play can't teach what the ladder's top snakes punish; their games can.
+module Texel
+
+open System
+open System.IO
+open System.Text.Json
+open System.Threading.Tasks
+open Snake.Engine
+
+/// The evaluation's raw features for one snake in one frame; the weights only re-weigh these.
+[<Struct>]
+type Sample =
+    { MyArea: int
+      MaxOppArea: int
+      MyLen: int
+      MaxOppLen: int
+      Others: int
+      Hp: int
+      Nf: int
+      /// How the snake finished: duel 1/0.5/0; standard the share of the other snakes it outlived (ties half)
+      Label: float32
+      /// Validation split, by game
+      Valid: bool }
+
+let private score (w: Weights) (s: Sample) =
+    Analyzer.Combine(w, s.MyArea, s.MaxOppArea, s.MyLen, s.MaxOppLen, s.Others, s.Hp, s.Nf)
+
+/// Features of every alive snake in every frame of one saved game (tune/fetch_games.py format), for games with
+/// `players` snakes on 11x11 standard rules.
+let private gameSamples (players: int) (path: string) : Sample[] =
+    use doc = JsonDocument.Parse(File.ReadAllText path)
+    let r = doc.RootElement
+    let mutable p = Unchecked.defaultof<JsonElement>
+
+    if not (r.TryGetProperty("n", &p)) || p.GetInt32() <> players
+       || r.GetProperty("w").GetInt32() <> 11 || r.GetProperty("h").GetInt32() <> 11
+       || r.GetProperty("ruleset").GetString() <> "standard" then
+        [||]
+    else
+        let geo = Geometry(11, 11)
+        let an = Analyzer(geo, players)
+        // Stable across runs (string.GetHashCode is randomized per process); ids are random hex
+        let valid = Convert.ToInt32((Path.GetFileName path).Substring(0, 2), 16) % 5 = 0
+        let out = ResizeArray()
+
+        for f in r.GetProperty("frames").EnumerateArray() do
+            let turn = f.GetProperty("t").GetInt32()
+            let snakes = f.GetProperty("snakes")
+            let alive = snakes.GetArrayLength()
+
+            if turn >= 3 && alive >= 2 then
+                let b = Board(geo, players)
+                let xy (a: JsonElement) i = geo.Cell(a.[i].GetInt32(), a.[i + 1].GetInt32())
+                let deaths = ResizeArray()
+
+                for s in snakes.EnumerateArray() do
+                    let body = s.GetProperty("body")
+                    b.AddSnake(s.GetProperty("hp").GetInt32(), [| for i in 0..2 .. body.GetArrayLength() - 1 -> xy body i |]) |> ignore
+                    deaths.Add(match s.TryGetProperty "dt" with
+                               | true, d -> d.GetInt32()
+                               | _ -> Int32.MaxValue)
+
+                let food = f.GetProperty("food")
+
+                for i in 0..2 .. food.GetArrayLength() - 1 do
+                    b.SetFood(xy food i, true)
+
+                b.Turn <- turn
+                an.Voronoi b
+                let deadBefore = players - alive
+
+                for me in 0 .. alive - 1 do
+                    let mutable maxOppArea = 0
+                    let mutable maxOppLen = 0
+                    let mutable outlived = float deadBefore
+
+                    for s in 0 .. alive - 1 do
+                        if s <> me then
+                            maxOppArea <- max maxOppArea (an.Area s)
+                            maxOppLen <- max maxOppLen (b.Length s)
+                            if deaths.[s] < deaths.[me] then outlived <- outlived + 1.0
+                            elif deaths.[s] = deaths.[me] then outlived <- outlived + 0.5
+
+                    out.Add
+                        { MyArea = an.Area me
+                          MaxOppArea = maxOppArea
+                          MyLen = b.Length me
+                          MaxOppLen = maxOppLen
+                          Others = alive - 1
+                          Hp = b.Health me
+                          Nf = an.NearestFood me
+                          Label = float32 (outlived / float (players - 1))
+                          Valid = valid }
+
+        out.ToArray()
+
+let private load (dir: string) (players: int) =
+    let files = Directory.GetFiles(dir, "*.json")
+    let parts = Array.zeroCreate files.Length
+    Parallel.For(0, files.Length, fun i -> parts.[i] <- gameSamples players files.[i]) |> ignore
+    let games = parts |> Array.filter (fun a -> a.Length > 0)
+    let all = Array.concat games
+    printfn "%d games, %d samples (%d validation)" games.Length all.Length (all |> Array.filter _.Valid |> Array.length)
+    all
+
+/// Mean squared error of sigmoid(eval / k) against the labels, over training or validation samples.
+/// `bias` is an intercept for the fit only: survivors outnumber the dead in the samples (dead snakes leave), so the
+/// labels average above 0.5, and without it the tuner inflates `area` (always positive) to shift every prediction.
+let private error (samples: Sample[]) (valid: bool) (w: Weights) (k: float) (bias: float) =
+    let chunks = Environment.ProcessorCount
+    let sums = Array.zeroCreate<float> chunks
+    let counts = Array.zeroCreate<int> chunks
+
+    Parallel.For(0, chunks, fun c ->
+        let mutable e = 0.0
+        let mutable n = 0
+
+        for i in c .. chunks .. samples.Length - 1 do
+            let s = samples.[i]
+
+            if s.Valid = valid then
+                let p = 1.0 / (1.0 + exp (-(score w s + bias) / k))
+                let d = float s.Label - p
+                e <- e + d * d
+                n <- n + 1
+
+        sums.[c] <- e
+        counts.[c] <- n)
+    |> ignore
+
+    Array.sum sums / float (Array.sum counts)
+
+/// Golden-section search for the scale K that best fits the given weights.
+let private golden (f: float -> float) lo0 hi0 =
+    let mutable lo = lo0
+    let mutable hi = hi0
+
+    for _ in 1..40 do
+        let a = lo + (hi - lo) * 0.382
+        let b = lo + (hi - lo) * 0.618
+        if f a < f b then hi <- b else lo <- a
+
+    (lo + hi) / 2.0
+
+/// Scale K, then the intercept, that best fit the given weights.
+let private fitKBias (samples: Sample[]) (w: Weights) =
+    let mutable k = 400.0
+    let mutable bias = 0.0
+
+    for _ in 1..3 do
+        k <- golden (fun k -> error samples false w k bias) 10.0 5000.0
+        bias <- golden (fun b -> error samples false w k b) -3000.0 3000.0
+
+    k, bias
+
+let run (argv: string[]) =
+    let dir = argv.[1]
+    let mode = argv.[2]
+    let players = if mode = "duel" then 2 else 4
+    let start = if argv.Length > 3 then Weights.Parse argv.[3] elif mode = "duel" then Weights.Duel else Weights.Standard
+    let samples = load dir players
+    let k, bias0 = fitKBias samples start
+    let show (w: Weights) =
+        String.Join(",", Array.map2 (fun (n: string) (v: float) -> $"{n}={v:G4}") Weights.Names w.Values)
+
+    let mean = samples |> Array.averageBy (fun s -> float s.Label)
+    let constErr valid =
+        samples |> Array.filter (fun s -> s.Valid = valid) |> Array.averageBy (fun s -> (float s.Label - mean) ** 2.0)
+
+    printfn "K = %.1f bias %.1f  train %.6f  valid %.6f  (always predicting the mean %.3f: train %.6f valid %.6f)" k bias0
+        (error samples false start k bias0) (error samples true start k bias0) mean (constErr false) (constErr true)
+
+    // Texel local search: try each weight up and down by a relative step, keep improvements, shrink the step when
+    // nothing helps. Relative steps because the weights differ by orders of magnitude.
+    let v = Array.copy start.Values
+    let mutable bias = bias0
+    let mutable best = error samples false start k bias
+    let mutable step = 0.2
+
+    while step > 0.005 do
+        let mutable improved = true
+
+        while improved do
+            improved <- false
+
+            for i in 0 .. v.Length - 1 do
+                for dir in [ 1.0 + step; 1.0 / (1.0 + step) ] do
+                    let old = v.[i]
+                    v.[i] <- old * dir
+                    let e = error samples false (Weights(v)) k bias
+
+                    if e < best - 1e-9 then
+                        best <- e
+                        improved <- true
+                    else
+                        v.[i] <- old
+
+            for d in [ step * k; -step * k ] do
+                let e = error samples false (Weights(v)) k (bias + d)
+
+                if e < best - 1e-9 then
+                    best <- e
+                    bias <- bias + d
+                    improved <- true
+
+        printfn "step %.3f  train %.6f  valid %.6f" step best (error samples true (Weights(v)) k bias)
+
+        step <- step / 2.0
+
+    printfn "bias %.1f" bias
+    printfn "result: %s" (show (Weights(v)))

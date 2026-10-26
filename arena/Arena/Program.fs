@@ -471,4 +471,5 @@ let main argv =
     | _ when argv.[0] = "tune" -> runTune argv
     | _ when argv.[0] = "reuse" -> runReuse argv
     | _ when argv.[0] = "depth" -> runDepth argv
+    | _ when argv.[0] = "texel" -> Texel.run argv; 0
     | _ -> runMatch (Array.append [| "match" |] argv)
