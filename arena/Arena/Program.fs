@@ -409,7 +409,6 @@ let runDepth (argv: string[]) =
     let n = if mode = "duel" then 2 else 4
     let cfg = SearchConfig.make (Weights.forSnakes n)
     let sum = Array.zeroCreate<int64> 3
-    let partial = Array.zeroCreate<int64> 3
     let mutable turns = 0
 
     for g in 1..8 do

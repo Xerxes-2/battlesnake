@@ -30,8 +30,18 @@
               pkgs.dotnetCorePackages.sdk_10_0
               pkgs.dotnetCorePackages.sdk_11_0
             ])
+            pkgs.fantomas
           ];
         };
+      });
+
+      # nix flake check：F# 格式与 .editorconfig 一致（fantomas 版本和 .config/dotnet-tools.json 对齐）
+      checks = forAll (pkgs: {
+        format = pkgs.runCommand "snake-format" { nativeBuildInputs = [ pkgs.fantomas ]; } ''
+          cd ${self}
+          HOME=$TMPDIR fantomas --check src arena bench tests
+          touch $out
+        '';
       });
 
       formatter = forAll (pkgs: pkgs.nixfmt);

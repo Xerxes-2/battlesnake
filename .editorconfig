@@ -1,0 +1,24 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Fantomas (checked by `nix flake check`). The widths are raised so short helpers and bit tricks stay on one line,
+# as the engine code is written; Fantomas's defaults would split most of them.
+[*.{fs,fsx,fsi}]
+indent_style = space
+indent_size = 4
+max_line_length = 120
+fsharp_max_function_binding_width = 120
+fsharp_max_value_binding_width = 120
+fsharp_max_infix_operator_expression = 120
+fsharp_max_if_then_else_short_width = 120
+fsharp_max_if_then_short_width = 120
+fsharp_max_record_width = 80
+fsharp_max_array_or_list_width = 120
+
+[*.nix]
+indent_size = 2

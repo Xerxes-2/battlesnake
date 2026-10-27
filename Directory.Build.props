@@ -9,6 +9,8 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <TieredPGO>true</TieredPGO>
-    <WarnOn>3390;$(WarnOn)</WarnOn>
+    <!-- 编译器警告当 lint：3390 文档注释格式，1182 未使用的变量，3560 不改字段的 { x with }；全部当错误 -->
+    <WarnOn>3390;1182;3560;$(WarnOn)</WarnOn>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 </Project>
