@@ -13,8 +13,10 @@ let decide (gs: GameState) (stopAt: int64) =
     let b, me = toBoard gs
     // Duels and multi-snake games reward different things (e.g. length matters more 1v1), so they are tuned apart
     let w =
-        if gs.Board.Snakes.Length = 2 then Weights.Duel
-        elif Sessions.legacyArm gs.Game.Id gs.Board.Snakes.Length then Weights.StandardPrev
+        let prev = Sessions.legacyArm gs.Game.Id gs.Board.Snakes.Length
+
+        if gs.Board.Snakes.Length = 2 then (if prev then Weights.DuelPrev else Weights.Duel)
+        elif prev then Weights.StandardPrev
         else Weights.Standard
     Sessions.search gs.Game.Id b me w stopAt
 

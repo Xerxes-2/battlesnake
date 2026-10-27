@@ -9,16 +9,21 @@ open System.Numerics
 type Weights(values: float[]) =
     static let names =
         [| "area"; "oppArea"; "len"; "lenCap"; "trapped"; "starve"; "noFoodHp"; "noFood"
-           "hungryHp"; "foodHungry"; "foodBehind"; "foodAhead"; "leadLen" |]
+           "hungryHp"; "foodHungry"; "foodBehind"; "foodAhead"; "leadLen"; "trapRatio" |]
 
-    static let defaults = [| 10.0; 4.0; 30.0; 4.0; 50.0; 5000.0; 30.0; 10.0; 30.0; 8.0; 4.0; 1.0; 2.0 |]
+    static let defaults = [| 10.0; 4.0; 30.0; 4.0; 50.0; 5000.0; 30.0; 10.0; 30.0; 8.0; 4.0; 1.0; 2.0; 1.0 |]
 
     static member Names = names
     static member Default = Weights(Array.copy defaults)
     /// Tuned by `Arena tune --mode duel --nodes 5000` (SPSA, ~19k games), then refined at `--nodes 30000` (100 iters x 32
     /// pairs, ~6.4k games; SPRT vs the 5k weights at 30k nodes: +35 elo [+12, +59]); copy of tune/weights-duel-30k.txt.
     /// Area and oppArea are nearly collinear 1v1 (they sum to roughly the free board), so their split is arbitrary.
-    static member val Duel = Weights.Parse "area=1.973,oppArea=1.681,len=100.778,lenCap=5.506,trapped=32.391,starve=2854.777,noFoodHp=28.094,noFood=9.887,hungryHp=49.46,foodHungry=7.999,foodBehind=3.469,foodAhead=0.118,leadLen=1.259"
+    /// trapRatio 1 -> 3 (0.7.5): on 570 ladder duels, territory under twice the length was the strongest
+    /// predictor of the result beyond the evaluation; self-play +159 elo vs trapRatio 1 (1.5: +38, 2: +45, 3 vs 2: +71,
+    /// 4.5 vs 3: no gain).
+    static member val Duel = Weights.Parse "area=1.973,oppArea=1.681,len=100.778,lenCap=5.506,trapped=32.391,starve=2854.777,noFoodHp=28.094,noFood=9.887,hungryHp=49.46,foodHungry=7.999,foodBehind=3.469,foodAhead=0.118,leadLen=1.259,trapRatio=3"
+    /// Before 0.7.5, kept for the ladder A/B.
+    static member val DuelPrev = Weights.Parse "area=1.973,oppArea=1.681,len=100.778,lenCap=5.506,trapped=32.391,starve=2854.777,noFoodHp=28.094,noFood=9.887,hungryHp=49.46,foodHungry=7.999,foodBehind=3.469,foodAhead=0.118,leadLen=1.259"
     /// Tuned by `Arena tune --mode standard --nodes 5000` (SPSA, ~10k games); copy of tune/weights-standard.txt
     /// trapped 1.08 -> 10: on 610 ladder games a snake with less territory than its length dies within 10 turns
     /// 4-20% of the time against 0.7% otherwise, yet the 5k-node SPSA had left the penalty near zero (+35 elo).
@@ -38,6 +43,8 @@ type Weights(values: float[]) =
     member _.FoodHungry = values.[9]
     member _.FoodBehind = values.[10]
     member _.FoodAhead = values.[11]
+    /// Territory below trapRatio x length counts as trapped (1 = can't even hold the body).
+    member _.TrapRatio = if values.Length > 13 then values.[13] else 1.0
     member _.LeadLen = values.[12]
 
     /// "name=value,name=value" (one per line also works); unknown names are an error, missing ones keep defaults.
@@ -298,8 +305,10 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
         let mutable score = w.Area * float myArea - w.OppArea * float maxOppArea + w.Len * float lenDiff
 
         // Not enough territory to hold our own body: we will most likely get trapped
-        if myArea < myLen then
-            score <- score - w.Trapped * float (myLen - myArea)
+        let need = w.TrapRatio * float myLen
+
+        if float myArea < need then
+            score <- score - w.Trapped * (need - float myArea)
 
         if nf = Int32.MaxValue then
             if float hp < w.NoFoodHp then score <- score - w.NoFood * (w.NoFoodHp - float hp)

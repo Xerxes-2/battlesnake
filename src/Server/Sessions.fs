@@ -34,15 +34,15 @@ let private diversity =
     | true, n -> n
     | _ -> 2
 
-/// Ladder A/B (SNAKE_AB, default on): Standard games whose id starts with an even hex digit play the previous
-/// Standard weights (Weights.StandardPrev), so both arms meet the same opponents at the same time. Self-play can't
+/// Ladder A/B (SNAKE_AB, default on): games whose id starts with an even hex digit play the previous weights
+/// (Weights.StandardPrev / DuelPrev), so both arms meet the same opponents at the same time. Self-play can't
 /// stand in for this (0.7.1 was neutral there and lost badly on the ladder), and over periods the arms can't be
 /// told apart because matchmaking keeps shifting.
 let private abTest = Environment.GetEnvironmentVariable "SNAKE_AB" <> "0"
 
 /// Whether a game plays the legacy arm, from its id alone so the logs and game ids can be split afterwards.
 let legacyArm (gameId: string) (snakes: int) =
-    abTest && snakes > 2 && gameId.Length > 0 && Uri.IsHexDigit gameId.[0] && Convert.ToInt32(string gameId.[0], 16) % 2 = 0
+    abTest && gameId.Length > 0 && Uri.IsHexDigit gameId.[0] && Convert.ToInt32(string gameId.[0], 16) % 2 = 0
 
 /// Games whose /end never arrived (engine hiccup, restart in between) get dropped after this long.
 let private idleTicks = TimeSpan.FromMinutes(10.0).Ticks
