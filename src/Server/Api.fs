@@ -1,7 +1,6 @@
 /// Data types for the Battlesnake API (https://docs.battlesnake.com/api), plus conversion to the engine's internal state.
 /// Only records are used, so the default System.Text.Json (web defaults: camelCase, case-insensitive) is enough.
-/// Fields the engine may leave out are typed `| null` (nullness checking is on for this project), so the compiler
-/// makes every use of them deal with the missing case.
+/// Fields the engine may leave out are `option`, like serde's Option: missing or null both read as None.
 module Snake.Server.Api
 
 open System.Collections.Concurrent
@@ -23,11 +22,11 @@ type SnakeDto =
 
 type RulesetSettings = { FoodSpawnChance: int; MinimumFood: int; HazardDamagePerTurn: int }
 
-type Ruleset = { Name: string; Version: string; Settings: RulesetSettings | null }
+type Ruleset = { Name: string; Version: string; Settings: RulesetSettings option }
 
 type Game =
     { Id: string
-      Ruleset: Ruleset | null
+      Ruleset: Ruleset option
       Map: string
       Timeout: int
       Source: string }
@@ -35,9 +34,9 @@ type Game =
 type BoardDto =
     { Height: int
       Width: int
-      Food: Coord[] | null
-      Hazards: Coord[] | null
-      Snakes: SnakeDto[] | null }
+      Food: Coord[] option
+      Hazards: Coord[] option
+      Snakes: SnakeDto[] option }
 
 type GameState = { Game: Game; Turn: int; Board: BoardDto; You: SnakeDto }
 
@@ -67,15 +66,9 @@ let private geometries = ConcurrentDictionary<struct (int * int), Geometry>()
 let geometry w h = geometries.GetOrAdd(struct (w, h), fun struct (w, h) -> Geometry(w, h))
 
 /// An array field the engine left out counts as empty.
-let orEmpty (a: 'T[] | null) =
-    match a with
-    | Null -> [||]
-    | NonNull a -> a
+let orEmpty (a: 'T[] option) = Option.defaultValue [||] a
 
-let rulesetName (g: Game) =
-    match g.Ruleset with
-    | NonNull r -> r.Name
-    | Null -> "?"
+let rulesetName (g: Game) = g.Ruleset |> Option.map _.Name |> Option.defaultValue "?"
 
 /// Converts the request into the engine state, putting "you" at index 0. Returns (board, my index).
 let toBoard (gs: GameState) : Board * int =
@@ -86,7 +79,7 @@ let toBoard (gs: GameState) : Board * int =
     b.Turn <- gs.Turn
 
     match gs.Game.Ruleset with
-    | NonNull { Settings = NonNull st } -> b.HazardDamage <- st.HazardDamagePerTurn
+    | Some { Settings = Some st } -> b.HazardDamage <- st.HazardDamagePerTurn
     | _ -> ()
 
     let cell (p: Coord) = geo.Cell(p.X, p.Y)

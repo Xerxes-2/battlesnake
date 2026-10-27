@@ -32,9 +32,10 @@ let warmup () =
         { Game =
             { Id = "warmup"
               Ruleset =
-                { Name = "standard"
-                  Version = ""
-                  Settings = { FoodSpawnChance = 15; MinimumFood = 1; HazardDamagePerTurn = 0 } }
+                Some
+                    { Name = "standard"
+                      Version = ""
+                      Settings = Some { FoodSpawnChance = 15; MinimumFood = 1; HazardDamagePerTurn = 0 } }
               Map = "standard"
               Timeout = 500
               Source = "" }
@@ -42,9 +43,9 @@ let warmup () =
           Board =
             { Height = 11
               Width = 11
-              Food = [| { X = 5; Y = 5 } |]
-              Hazards = [||]
-              Snakes = snakes }
+              Food = Some [| { X = 5; Y = 5 } |]
+              Hazards = None
+              Snakes = Some snakes }
           You = snakes[0] }
 
     // Many short searches: tiering promotes a method after ~30 calls, then OSR/PGO need loops to run
