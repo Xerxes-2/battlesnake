@@ -45,7 +45,7 @@ let randomMoves (b: Board) (moves: Dir[]) =
                 d <- enum<Dir> ((int d + 1) % 4)
                 tries <- tries + 1
 
-            moves.[s] <- d
+            moves[s] <- d
 
     if next () % 100UL < 15UL then
         let c = int (next () % uint64 geo.Cells)
@@ -85,7 +85,7 @@ let measure name (seconds: float) (work: unit -> int) =
                float ops / sw.Elapsed.TotalSeconds |]
 
     Array.sortInPlace rates
-    printfn "%-28s median %12.0f /s   (min %.0f, max %.0f)" name rates.[rounds / 2] rates.[0] rates.[rounds - 1]
+    printfn "%-28s median %12.0f /s   (min %.0f, max %.0f)" name rates[rounds / 2] rates[0] rates[rounds - 1]
 
 /// Fixed-time search on mid-game positions: nodes/s and the average completed depth (what actually matters)
 let searchBench (positions: Board[]) (ms: float) (rounds: int) =
@@ -100,7 +100,7 @@ let searchBench (positions: Board[]) (ms: float) (rounds: int) =
             let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
             // Rounds repeat the same positions: start cold so the table cannot carry answers over
             sr.Clear()
-            let r = sr.Search(p, me, Limits.forMs ms)
+            let r = sr.Search(p, me, Limits.forMs (ms * 1.0<ms>))
             nodes <- nodes + r.Nodes
             depth <- depth + int64 r.Depth
             n <- n + 1
@@ -117,7 +117,7 @@ let mixedPositions (n: int) (count: int) =
         let b = Board(geo, n)
 
         for i in 0 .. n - 1 do
-            let c = geo.Cell starts.[i]
+            let c = geo.Cell starts[i]
             b.AddSnake(100, [| c; c; c |]) |> ignore
 
         b.SetFood(geo.Cell(5, 5), true)
@@ -125,11 +125,11 @@ let mixedPositions (n: int) (count: int) =
 
         while b.AliveCount >= 2 && b.Turn < 90 && res.Count < count do
             for s in 0 .. n - 1 do
-                moves.[s] <- enum<Dir> (rng.Next 4)
+                moves[s] <- enum<Dir> (rng.Next 4)
 
                 for _ in 1..4 do
-                    let nb = geo.Neighbor(b.Head s, moves.[s])
-                    if nb < 0 || b.Occupancy nb > 0 then moves.[s] <- enum<Dir> (rng.Next 4)
+                    let nb = geo.Neighbor(b.Head s, moves[s])
+                    if nb < 0 || b.Occupancy nb > 0 then moves[s] <- enum<Dir> (rng.Next 4)
 
             b.Step moves
             if rng.Next 100 < 20 then b.SetFood(rng.Next geo.Cells, true)
@@ -164,7 +164,7 @@ let smpBench (positions: Board[]) (ms: float) (threads: int) =
         for p in positions do
             ps.Clear()
             let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
-            let r = ps.Search(p, me, Limits.forMs ms, t - 1)
+            let r = ps.Search(p, me, Limits.forMs (ms * 1.0<ms>), t - 1)
             nodes <- nodes + r.Nodes
             depth <- depth + int64 r.Depth
 
@@ -267,24 +267,24 @@ let main argv =
 
     measure "evaluate (voronoi)" 1.0 (fun () ->
         i <- (i + 1) % positions.Length
-        Eval.evaluate Weights.defaults an positions.[i] 0 |> ignore
+        Eval.evaluate Weights.defaults an positions[i] 0 |> ignore
         1)
 
     measure "voronoi scalar" 1.0 (fun () ->
         i <- (i + 1) % positions.Length
-        an.VoronoiScalar positions.[i]
+        an.VoronoiScalar positions[i]
         1)
 
     measure "voronoi bits" 1.0 (fun () ->
         i <- (i + 1) % positions.Length
-        an.VoronoiBits positions.[i]
+        an.VoronoiBits positions[i]
         1)
 
     let policy = Policy.create geo 4
 
     measure "decide (1-ply paranoid)" 1.0 (fun () ->
         i <- (i + 1) % positions.Length
-        let p = positions.[i]
+        let p = positions[i]
         let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
         policy p me |> ignore
         1)

@@ -21,11 +21,11 @@ let positions (seed: int) (count: int) =
 
         while b.AliveCount >= 2 && b.Turn < 80 && res.Count < count do
             for s in 0..3 do
-                moves.[s] <- enum<Dir> (rng.Next 4)
+                moves[s] <- enum<Dir> (rng.Next 4)
 
                 for _ in 1..4 do
-                    let nb = geo.Neighbor(b.Head s, moves.[s])
-                    if nb < 0 || b.Occupancy nb > 0 then moves.[s] <- enum<Dir> (rng.Next 4)
+                    let nb = geo.Neighbor(b.Head s, moves[s])
+                    if nb < 0 || b.Occupancy nb > 0 then moves[s] <- enum<Dir> (rng.Next 4)
 
             b.Step moves
             if rng.Next 100 < 25 then b.SetFood(rng.Next geo.Cells, true)
@@ -70,19 +70,18 @@ let ``reusing a persistent table keeps the result at least as deep`` () =
 [<Fact>]
 let ``parallel searcher stops on time and plays legal moves`` () =
     let ps = ParallelSearcher(geo, 4, SearchConfig.make Weights.standard, 4)
-    let ms (t: int64) = float (System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / float System.Diagnostics.Stopwatch.Frequency
 
     for b in positions 21 20 do
-        let t0 = System.Diagnostics.Stopwatch.GetTimestamp()
-        let r = ps.Search(b, 0, Limits.forMs 30.0, 3)
-        Assert.True(ms t0 < 80.0, $"took {ms t0} ms")
+        let t0 = Time.now ()
+        let r = ps.Search(b, 0, Limits.forMs 30.0<ms>, 3)
+        Assert.True(Time.since t0 < 80.0<ms>, $"took {Time.since t0} ms")
         Assert.True(geo.Neighbor(b.Head 0, r.Move) >= 0)
 
     // Snake in the corner with its neck blocking one way: a single legal move
     let b = Board(geo, 4)
     b.AddSnake(100, [| geo.Cell(0, 0); geo.Cell(1, 0); geo.Cell(2, 0) |]) |> ignore
     b.AddSnake(100, [| geo.Cell(9, 9); geo.Cell(9, 8); geo.Cell(9, 7) |]) |> ignore
-    let t0 = System.Diagnostics.Stopwatch.GetTimestamp()
-    let r = ps.Search(b, 0, Limits.forMs 2000.0, 3)
+    let t0 = Time.now ()
+    let r = ps.Search(b, 0, Limits.forMs 2000.0<ms>, 3)
     Assert.Equal(Dir.Up, r.Move)
-    Assert.True(ms t0 < 500.0, $"forced move took {ms t0} ms")
+    Assert.True(Time.since t0 < 500.0<ms>, $"forced move took {Time.since t0} ms")

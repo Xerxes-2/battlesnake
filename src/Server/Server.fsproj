@@ -1,6 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
+    <!-- F# 9 nullness checking: API fields the engine may omit are `T | null` (see Api.fs) -->
+    <Nullable>enable</Nullable>
+    <WarningsAsErrors>FS3261</WarningsAsErrors>
     <TargetFrameworks>$(SnakeTargetFrameworks)</TargetFrameworks>
     <RootNamespace>Snake.Server</RootNamespace>
     <AssemblyName>snake-server</AssemblyName>

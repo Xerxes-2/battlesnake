@@ -11,7 +11,7 @@ let load (name: string) =
     let r = doc.RootElement
     let geo = Geometry(11, 11)
     let b = Board(geo, 4)
-    let cell (e: JsonElement) = geo.Cell(e.[0].GetInt32(), e.[1].GetInt32())
+    let cell (e: JsonElement) = geo.Cell(e[0].GetInt32(), e[1].GetInt32())
 
     let snakes =
         [ for s in r.GetProperty("snakes").EnumerateArray() ->

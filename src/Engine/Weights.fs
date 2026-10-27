@@ -33,20 +33,20 @@ module Weights =
 
     /// Inverse of toArray. 13 values (files from before trapRatio) leave it at 1.
     let ofArray (v: float[]) =
-        { Area = v.[0]
-          OppArea = v.[1]
-          Len = v.[2]
-          LenCap = v.[3]
-          Trapped = v.[4]
-          Starve = v.[5]
-          NoFoodHp = v.[6]
-          NoFood = v.[7]
-          HungryHp = v.[8]
-          FoodHungry = v.[9]
-          FoodBehind = v.[10]
-          FoodAhead = v.[11]
-          LeadLen = v.[12]
-          TrapRatio = if v.Length > 13 then v.[13] else 1.0 }
+        { Area = v[0]
+          OppArea = v[1]
+          Len = v[2]
+          LenCap = v[3]
+          Trapped = v[4]
+          Starve = v[5]
+          NoFoodHp = v[6]
+          NoFood = v[7]
+          HungryHp = v[8]
+          FoodHungry = v[9]
+          FoodBehind = v[10]
+          FoodAhead = v[11]
+          LeadLen = v[12]
+          TrapRatio = if v.Length > 13 then v[13] else 1.0 }
 
     /// The hand-picked starting point.
     let defaults = ofArray [| 10.0; 4.0; 30.0; 4.0; 50.0; 5000.0; 30.0; 10.0; 30.0; 8.0; 4.0; 1.0; 2.0; 1.0 |]
@@ -59,7 +59,7 @@ module Weights =
             match part.Split('=') with
             | [| k; x |] ->
                 match Array.tryFindIndex ((=) (k.Trim())) names with
-                | Some i -> v.[i] <- Double.Parse(x.Trim(), CultureInfo.InvariantCulture)
+                | Some i -> v[i] <- Double.Parse(x.Trim(), CultureInfo.InvariantCulture)
                 | None -> failwith $"unknown weight {k}"
             | _ -> failwith $"bad weight entry {part}"
 

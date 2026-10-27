@@ -9,11 +9,9 @@ open Snake.Engine
 open Snake.Server.Api
 
 /// Searches until `stopAt` (a Stopwatch timestamp) with this game's persistent searcher.
-let decide (gs: GameState) (stopAt: int64) =
+let decide (gs: GameState) (stopAt: int64<tick>) =
     let b, me = toBoard gs
     Sessions.search gs.Game.Id b me stopAt
-
-let msToTicks (ms: float) = int64 (ms * float Stopwatch.Frequency / 1000.0)
 
 /// Startup warmup: run the decision path a few hundred times on a fake board so the JIT promotes the hot paths to optimized code (tier 1).
 let warmup () =
@@ -28,11 +26,11 @@ let warmup () =
                    Map = "standard"; Timeout = 500; Source = "" }
           Turn = 5
           Board = { Height = 11; Width = 11; Food = [| { X = 5; Y = 5 } |]; Hazards = [||]; Snakes = snakes }
-          You = snakes.[0] }
+          You = snakes[0] }
 
     // Many short searches: tiering promotes a method after ~30 calls, then OSR/PGO need loops to run
     let sw = Stopwatch.StartNew()
-    for _ in 1..60 do decide gs (Stopwatch.GetTimestamp() + msToTicks 5.0) |> ignore
+    for _ in 1..60 do decide gs (Time.after 5.0<ms>) |> ignore
     Sessions.finish "warmup"
     sw.Elapsed.TotalMilliseconds
 
@@ -51,27 +49,27 @@ let main args =
     let log = app.Logger
     log.LogInformation("snake-server {v}, runtime {rt}, threads {th}, warmup {ms:F0} ms", version, Runtime.InteropServices.RuntimeInformation.FrameworkDescription, Sessions.threads, warmup ())
 
-    app.MapGet("/", Func<obj>(fun () -> box info)) |> ignore
+    app.MapGet("/", Func<_>(fun () -> info)) |> ignore
 
     app.MapPost("/start", Func<GameState, IResult>(fun gs ->
-        log.LogInformation("start {game} {ruleset} {w}x{h} snakes={n} arm={arm}", gs.Game.Id, gs.Game.Ruleset.Name, gs.Board.Width, gs.Board.Height, gs.Board.Snakes.Length, (if Sessions.legacyArm gs.Game.Id then "legacy" else "new"))
+        log.LogInformation("start {game} {ruleset} {w}x{h} snakes={n} arm={arm}", gs.Game.Id, rulesetName gs.Game, gs.Board.Width, gs.Board.Height, (orEmpty gs.Board.Snakes).Length, (if Sessions.legacyArm gs.Game.Id then "legacy" else "new"))
         Results.Ok())) |> ignore
 
-    app.MapPost("/move", Func<GameState, obj>(fun gs ->
-        let t0 = Stopwatch.GetTimestamp()
+    app.MapPost("/move", Func<GameState, _>(fun gs ->
+        let t0 = Time.now ()
         let budget, net = Clock.budget gs.Game.Id gs.Game.Timeout gs.You.Latency
-        let r = decide gs (t0 + msToTicks budget)
-        let ms = Stopwatch.GetElapsedTime(t0).TotalMilliseconds
-        Clock.record gs.Game.Id ms
+        let r = decide gs (t0 + Time.ticks budget)
+        let took = Time.since t0
+        Clock.record gs.Game.Id took
         log.LogInformation(
             "move {game} t={turn} -> {dir} d={depth}{relaxed} score={score:F0} nodes={nodes} ({ms:F1}/{budget:F0} ms, net~{net:F0}, lat={lat})",
-            gs.Game.Id, gs.Turn, Dir.toApi r.Move, r.Depth, (if r.Relaxed then "R" else ""), r.Score, r.Nodes, ms, budget, net, gs.You.Latency)
-        box {| move = Dir.toApi r.Move; shout = "" |})) |> ignore
+            gs.Game.Id, gs.Turn, Dir.toApi r.Move, r.Depth, (if r.Relaxed then "R" else ""), r.Score, r.Nodes, float took, float budget, float net, gs.You.Latency)
+        {| move = Dir.toApi r.Move; shout = "" |})) |> ignore
 
     app.MapPost("/end", Func<GameState, IResult>(fun gs ->
         Clock.finish gs.Game.Id
         Sessions.finish gs.Game.Id
-        let won = gs.Board.Snakes |> Array.exists (fun s -> s.Id = gs.You.Id)
+        let won = orEmpty gs.Board.Snakes |> Array.exists (fun s -> s.Id = gs.You.Id)
         log.LogInformation("end {game} turn={turn} {result}", gs.Game.Id, gs.Turn, (if won then "WIN/ALIVE" else "LOSS"))
         Results.Ok())) |> ignore
 

@@ -39,12 +39,12 @@ type Territory(geo: Geometry, maxSnakes: int) =
     let ncLLo, ncLHi = maskOf (fun c -> geo.X c <> geo.Width - 1) 0, maskOf (fun c -> geo.X c <> geo.Width - 1) 1
     let w1 = geo.Width
 
-    member _.Area(s: int) = area.[s]
+    member _.Area(s: int) = area[s]
     /// Distance to the nearest food inside the snake's own territory; Int32.MaxValue when there is none.
-    member _.NearestFood(s: int) = nearestFood.[s]
+    member _.NearestFood(s: int) = nearestFood[s]
     /// Only filled by VoronoiScalar (the bitboard version computes areas and food distances only).
-    member _.Owner(c: int) = owner.[c]
-    member _.Dist(c: int) = dist.[c]
+    member _.Owner(c: int) = owner[c]
+    member _.Dist(c: int) = dist[c]
 
     /// Fills Area and NearestFood. Uses the bitboard version when the board fits in 128 cells.
     member this.Voronoi(b: Board) =
@@ -68,10 +68,10 @@ type Territory(geo: Geometry, maxSnakes: int) =
         let mutable blHi = b.OccHi
 
         for s in 0 .. n - 1 do
-            area.[s] <- 0
-            nearestFood.[s] <- Int32.MaxValue
-            frLo.[s] <- 0UL
-            frHi.[s] <- 0UL
+            area[s] <- 0
+            nearestFood[s] <- Int32.MaxValue
+            frLo[s] <- 0UL
+            frHi[s] <- 0UL
 
             if b.Alive s then
                 let len = b.Length s
@@ -84,16 +84,16 @@ type Territory(geo: Geometry, maxSnakes: int) =
                 twHi <- twHi ||| (onHi &&& hh)
                 onLo <- onLo ||| hl
                 onHi <- onHi ||| hh
-                frLo.[s] <- hl
-                frHi.[s] <- hh
+                frLo[s] <- hl
+                frHi[s] <- hh
 
         // Two heads on one cell: contested from the start
         for s in 0 .. n - 1 do
-            frLo.[s] <- frLo.[s] &&& ~~~twLo
-            frHi.[s] <- frHi.[s] &&& ~~~twHi
+            frLo[s] <- frLo[s] &&& ~~~twLo
+            frHi[s] <- frHi[s] &&& ~~~twHi
 
-        frLo.[n] <- twLo
-        frHi.[n] <- twHi
+        frLo[n] <- twLo
+        frHi[n] <- twHi
         let mutable rLo = onLo
         let mutable rHi = onHi
         let fdLo = b.FoodLo
@@ -128,8 +128,8 @@ type Territory(geo: Geometry, maxSnakes: int) =
             twHi <- 0UL
 
             for p in 0..n do
-                let lo = frLo.[p]
-                let hi = frHi.[p]
+                let lo = frLo[p]
+                let hi = frHi[p]
 
                 if (lo ||| hi) <> 0UL then
                     // left/right shifts by one column (masked against wrapping), up/down by one row
@@ -151,24 +151,24 @@ type Territory(geo: Geometry, maxSnakes: int) =
                     twHi <- twHi ||| (onHi &&& eHi)
                     onLo <- onLo ||| eLo
                     onHi <- onHi ||| eHi
-                    frLo.[p] <- eLo
-                    frHi.[p] <- eHi
+                    frLo[p] <- eLo
+                    frHi[p] <- eHi
 
             for s in 0 .. n - 1 do
-                let oLo = frLo.[s] &&& ~~~twLo
-                let oHi = frHi.[s] &&& ~~~twHi
+                let oLo = frLo[s] &&& ~~~twLo
+                let oHi = frHi[s] &&& ~~~twHi
 
                 if (oLo ||| oHi) <> 0UL then
-                    area.[s] <- area.[s] + BitOperations.PopCount oLo + BitOperations.PopCount oHi
+                    area[s] <- area[s] + BitOperations.PopCount oLo + BitOperations.PopCount oHi
 
-                    if nearestFood.[s] = Int32.MaxValue && ((oLo &&& fdLo) ||| (oHi &&& fdHi)) <> 0UL then
-                        nearestFood.[s] <- d
+                    if nearestFood[s] = Int32.MaxValue && ((oLo &&& fdLo) ||| (oHi &&& fdHi)) <> 0UL then
+                        nearestFood[s] <- d
 
-                frLo.[s] <- oLo
-                frHi.[s] <- oHi
+                frLo[s] <- oLo
+                frHi[s] <- oHi
 
-            frLo.[n] <- frLo.[n] ||| twLo
-            frHi.[n] <- frHi.[n] ||| twHi
+            frLo[n] <- frLo[n] ||| twLo
+            frHi[n] <- frHi[n] ||| twHi
             rLo <- rLo ||| onLo
             rHi <- rHi ||| onHi
             active <- (onLo ||| onHi) <> 0UL
@@ -180,8 +180,8 @@ type Territory(geo: Geometry, maxSnakes: int) =
         Array.Clear(vacate)
 
         for s in 0 .. n - 1 do
-            area.[s] <- 0
-            nearestFood.[s] <- Int32.MaxValue
+            area[s] <- 0
+            nearestFood[s] <- Int32.MaxValue
 
             if b.Alive s then
                 let len = b.Length s
@@ -189,7 +189,7 @@ type Territory(geo: Geometry, maxSnakes: int) =
                 for k in 0 .. len - 1 do
                     let c = b.Body(s, k)
                     let v = len - k
-                    if v > vacate.[c] then vacate.[c] <- v
+                    if v > vacate[c] then vacate[c] <- v
 
         let mutable qt = 0
 
@@ -197,44 +197,44 @@ type Territory(geo: Geometry, maxSnakes: int) =
             if b.Alive s then
                 let h = b.Head s
 
-                if owner.[h] = -1 then
-                    owner.[h] <- s
-                    dist.[h] <- 0
-                    queue.[qt] <- h
+                if owner[h] = -1 then
+                    owner[h] <- s
+                    dist[h] <- 0
+                    queue[qt] <- h
                     qt <- qt + 1
                 else
-                    owner.[h] <- -2
+                    owner[h] <- -2
 
         let mutable qh = 0
 
         while qh < qt do
-            let c = queue.[qh]
+            let c = queue[qh]
             qh <- qh + 1
-            let o = owner.[c]
-            let d = dist.[c] + 1
+            let o = owner[c]
+            let d = dist[c] + 1
 
             for i in 0..3 do
                 let nb = geo.Neighbor(c, enum<Dir> i)
 
                 if nb >= 0 then
-                    if owner.[nb] = -1 then
-                        if d >= vacate.[nb] then
-                            owner.[nb] <- o
-                            dist.[nb] <- d
-                            queue.[qt] <- nb
+                    if owner[nb] = -1 then
+                        if d >= vacate[nb] then
+                            owner[nb] <- o
+                            dist[nb] <- d
+                            queue[qt] <- nb
                             qt <- qt + 1
-                    elif dist.[nb] = d && owner.[nb] <> o then
-                        owner.[nb] <- -2
+                    elif dist[nb] = d && owner[nb] <> o then
+                        owner[nb] <- -2
 
         for i in 0 .. qt - 1 do
-            let c = queue.[i]
-            let o = owner.[c]
+            let c = queue[i]
+            let o = owner[c]
 
-            if o >= 0 && dist.[c] > 0 then
-                area.[o] <- area.[o] + 1
+            if o >= 0 && dist[c] > 0 then
+                area[o] <- area[o] + 1
 
-                if b.IsFood c && dist.[c] < nearestFood.[o] then
-                    nearestFood.[o] <- dist.[c]
+                if b.IsFood c && dist[c] < nearestFood[o] then
+                    nearestFood[o] <- dist[c]
 
 /// The raw evaluation features of one snake. Kept separate from the weights so the Texel tuner can compute them once
 /// and re-weigh them many times.
@@ -343,7 +343,7 @@ module Policy =
 
             for s in 0 .. n - 1 do
                 if s <> me && b.Alive s then
-                    opp.[no] <- s
+                    opp[no] <- s
                     let h = b.Head s
                     let neck = if b.Length s > 1 then b.Body(s, 1) else -1
                     let mutable k = 0
@@ -352,14 +352,14 @@ module Policy =
                         let nb = geo.Neighbor(h, d)
 
                         if nb >= 0 && nb <> neck then
-                            oppMoves.[no * 4 + k] <- d
+                            oppMoves[no * 4 + k] <- d
                             k <- k + 1
 
                     if k = 0 then
-                        oppMoves.[no * 4] <- Dir.Up
+                        oppMoves[no * 4] <- Dir.Up
                         k <- 1
 
-                    oppCount.[no] <- k
+                    oppCount[no] <- k
                     no <- no + 1
 
             let myHead = b.Head me
@@ -369,7 +369,7 @@ module Policy =
 
             for d in Dir.all do
                 if geo.Neighbor(myHead, d) >= 0 then
-                    moves.[me] <- d
+                    moves[me] <- d
                     Array.Clear(odo)
                     let mutable worst = Double.PositiveInfinity
                     let mutable sum = 0.0
@@ -378,7 +378,7 @@ module Policy =
 
                     while not fin do
                         for i in 0 .. no - 1 do
-                            moves.[opp.[i]] <- oppMoves.[i * 4 + odo.[i]]
+                            moves[opp[i]] <- oppMoves[i * 4 + odo[i]]
 
                         scratch.CopyFrom b
                         scratch.Step moves
@@ -391,10 +391,10 @@ module Policy =
                         let mutable carry = true
 
                         while carry && i < no do
-                            odo.[i] <- odo.[i] + 1
+                            odo[i] <- odo[i] + 1
 
-                            if odo.[i] = oppCount.[i] then
-                                odo.[i] <- 0
+                            if odo[i] = oppCount[i] then
+                                odo[i] <- 0
                                 i <- i + 1
                             else
                                 carry <- false

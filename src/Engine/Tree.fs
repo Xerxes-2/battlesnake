@@ -47,16 +47,13 @@ module SearchConfig =
 /// When one search stops: at the Stopwatch timestamp StopAt, after Nodes nodes (0 = no limit; node limits make
 /// self-play deterministic and independent of machine load) or after iteration Depth, whichever comes first.
 [<Struct>]
-type Limits = { StopAt: int64; Nodes: int64; Depth: int }
+type Limits = { StopAt: int64<tick>; Nodes: int64; Depth: int }
 
 module Limits =
-    let until (stopAt: int64) = { StopAt = stopAt; Nodes = 0L; Depth = Int32.MaxValue }
-
-    let forMs (ms: float) =
-        until (Stopwatch.GetTimestamp() + int64 (ms * float Stopwatch.Frequency / 1000.0))
-
-    let nodes (n: int64) = { StopAt = Int64.MaxValue; Nodes = n; Depth = Int32.MaxValue }
-    let depth (d: int) = { StopAt = Int64.MaxValue; Nodes = 0L; Depth = d }
+    let until (stopAt: int64<tick>) = { StopAt = stopAt; Nodes = 0L; Depth = Int32.MaxValue }
+    let forMs (t: float<ms>) = until (Time.after t)
+    let nodes (n: int64) = { StopAt = Time.never; Nodes = n; Depth = Int32.MaxValue }
+    let depth (d: int) = { StopAt = Time.never; Nodes = 0L; Depth = d }
 
 /// Transposition table entry, 16 bytes. The slot index is the hash's low bits. Data is the score's bits;
 /// Key = meta ^^^ Data, meta = check (hash high 32 bits) << 32 | depth << 24 | flag << 16 | move << 8 | age,
@@ -71,13 +68,9 @@ type TTEntry =
 [<Sealed; AllowNullLiteral>]
 type TTable(bits: int) =
     let entries = Array.zeroCreate<TTEntry> (1 <<< bits)
-    let mutable age = 0uy
     member _.Entries = entries
     member _.Mask = (1 <<< bits) - 1
-
-    member _.Age
-        with get () = age
-        and set v = age <- v
+    member val Age = 0uy with get, set
 
     member _.Clear() = Array.Clear entries
 
@@ -134,7 +127,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     let mutable maxDepth = maxPly
 
     let mutable me = 0
-    let mutable deadline = 0L
+    let mutable deadline = 0L<tick>
     let mutable nodes = 0L
     let mutable aborted = false
     let mutable nodeLimit = 0L
@@ -161,23 +154,23 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     // Never 0, so an empty slot cannot match
     member private _.Hash(b: Board) = b.Hash ||| 1UL
 
-    /// Sorts dst.[off .. off+n-1] by descending hist.[head*4+dir], with `first` (if present) in front.
+    /// Sorts dst[off .. off+n-1] by descending hist[head*4+dir], with `first` (if present) in front.
     member private _.Order(dst: Dir[], off: int, n: int, hist: int[], head: int, first: int) =
         for i in 0 .. n - 1 do
-            let d = int dst.[off + i]
-            key.[i] <- if d = first then Int32.MaxValue else hist.[head * 4 + d]
+            let d = int dst[off + i]
+            key[i] <- if d = first then Int32.MaxValue else hist[head * 4 + d]
 
         for i in 1 .. n - 1 do
-            let k, m = key.[i], dst.[off + i]
+            let k, m = key[i], dst[off + i]
             let mutable j = i - 1
 
-            while j >= 0 && key.[j] < k do
-                key.[j + 1] <- key.[j]
-                dst.[off + j + 1] <- dst.[off + j]
+            while j >= 0 && key[j] < k do
+                key[j + 1] <- key[j]
+                dst[off + j + 1] <- dst[off + j]
                 j <- j - 1
 
-            key.[j + 1] <- k
-            dst.[off + j + 1] <- m
+            key[j + 1] <- k
+            dst[off + j + 1] <- m
 
     /// A cell is blocked next turn if a body segment will still be there: anything except a tail
     /// that is about to move (a tail stacked after eating has occupancy 2 and stays).
@@ -206,17 +199,17 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
             let nb = geo.Neighbor(h, d)
 
             if nb >= 0 && not (Searcher.Blocked(b, nb)) then
-                dst.[off + k] <- d
+                dst[off + k] <- d
                 k <- k + 1
 
         if k = 0 then
             for d in Dir.all do
                 if geo.Neighbor(h, d) >= 0 then
-                    dst.[off + k] <- d
+                    dst[off + k] <- d
                     k <- k + 1
 
         if k = 0 then
-            dst.[off] <- Dir.Up
+            dst[off] <- Dir.Up
             k <- 1
 
         k
@@ -225,11 +218,11 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     member private this.Default(b: Board, s: int) =
         let n = this.Gen(b, s, tmp, 0)
         let h = b.Head s
-        let mutable best = tmp.[0]
+        let mutable best = tmp[0]
         let mutable bestFree = -1
 
         for i in 0 .. n - 1 do
-            let t = geo.Neighbor(h, tmp.[i])
+            let t = geo.Neighbor(h, tmp[i])
 
             if t >= 0 then
                 let mutable free = 0
@@ -240,7 +233,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
 
                 if free > bestFree then
                     bestFree <- free
-                    best <- tmp.[i]
+                    best <- tmp[i]
 
         best
 
@@ -258,15 +251,15 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     member private _.CheckTime() =
         if (nodeLimit > 0L && nodes >= nodeLimit)
            || ((nodes &&& checkMask) = 0L
-               && (Stopwatch.GetTimestamp() > deadline || Volatile.Read(&stopRequested))) then
+               && (Time.now () > deadline || Volatile.Read(&stopRequested))) then
             aborted <- true
 
-    /// Value of boards.[ply] for me with `depth` plies left, inside the window (alpha, beta).
-    /// At ply 0 the per-move scores land in rootScore and myMoves.[0] holds the move order.
+    /// Value of boards[ply] for me with `depth` plies left, inside the window (alpha, beta).
+    /// At ply 0 the per-move scores land in rootScore and myMoves[0] holds the move order.
     member private this.Max(ply: int, depth: int, alpha: float, beta: float, nMine: int) : float =
-        let b = boards.[ply]
-        let mv = moves.[ply]
-        let mine = myMoves.[ply]
+        let b = boards[ply]
+        let mv = moves[ply]
+        let mine = myMoves[ply]
         let nm = if ply = 0 then nMine else this.Gen(b, me, mine, 0)
         let myHead0 = b.Head me
         let mutable hash = 0UL
@@ -277,7 +270,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
         if ordering && ply > 0 then
             hash <- this.Hash b
             slot <- int hash &&& ttMask
-            let e = &tt.[slot]
+            let e = &tt[slot]
             let data = e.Data
             let meta = e.Key ^^^ data
             let flag = byte (meta >>> 16)
@@ -303,9 +296,9 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
         // Opponents: adversarial if their head can meet mine within the remaining plies
         let myHead = b.Head me
         let mx, my = geo.X myHead, geo.Y myHead
-        let advs = adv.[ply]
-        let am = advMoves.[ply]
-        let ac = advCount.[ply]
+        let advs = adv[ply]
+        let am = advMoves[ply]
+        let ac = advCount[ply]
         let mutable na = 0
         let mutable opps = 0
 
@@ -335,22 +328,22 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                 // A lone opponent is always searched: 1v1 the whole board is the fight (its space is our space),
                 // and a far opponent walking into a dead end under Default produced fake forced wins (game 60b3aa33).
                 if (not relaxed || s = nearest || (relaxNear && dist <= 2)) && ((soundProofs && opps = 1) || dist <= 2 * depth) then
-                    advs.[na] <- s
-                    ac.[na] <- this.Gen(b, s, am, na * 4)
-                    if ordering && ac.[na] > 1 then this.Order(am, na * 4, ac.[na], histOpp, h, -1)
+                    advs[na] <- s
+                    ac[na] <- this.Gen(b, s, am, na * 4)
+                    if ordering && ac[na] > 1 then this.Order(am, na * 4, ac[na], histOpp, h, -1)
                     na <- na + 1
                 else
-                    mv.[s] <- this.Default(b, s)
+                    mv[s] <- this.Default(b, s)
                     simplified <- true
 
-        let od = odo.[ply]
-        let child = boards.[ply + 1]
+        let od = odo[ply]
+        let child = boards[ply + 1]
         let mutable best = Double.NegativeInfinity
         let mutable bestI = 0
         let mutable i = 0
 
         while i < nm && not aborted do
-            mv.[me] <- mine.[i]
+            mv[me] <- mine[i]
             let a = max alpha best
             let mutable worst = Double.PositiveInfinity
             Array.Clear(od, 0, na)
@@ -358,7 +351,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
 
             while not fin do
                 for j in 0 .. na - 1 do
-                    mv.[advs.[j]] <- am.[j * 4 + od.[j]]
+                    mv[advs[j]] <- am[j * 4 + od[j]]
 
                 child.CopyFrom b
                 child.Step mv
@@ -385,9 +378,9 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                     // This move cannot beat what we already have; credit the opponents' refutation
                     if ordering && not aborted && depth > 1 then
                         for j in 0 .. na - 1 do
-                            let s = advs.[j]
-                            let i4 = b.Head s * 4 + int mv.[s]
-                            histOpp.[i4] <- histOpp.[i4] + depth * depth
+                            let s = advs[j]
+                            let i4 = b.Head s * 4 + int mv[s]
+                            histOpp[i4] <- histOpp[i4] + depth * depth
 
                     fin <- true
                 else
@@ -395,10 +388,10 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                     let mutable carry = true
 
                     while carry && j < na do
-                        od.[j] <- od.[j] + 1
+                        od[j] <- od[j] + 1
 
-                        if od.[j] = ac.[j] then
-                            od.[j] <- 0
+                        if od[j] = ac[j] then
+                            od[j] <- 0
                             j <- j + 1
                         else
                             carry <- false
@@ -406,7 +399,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                     if carry then fin <- true
 
             if not aborted then
-                if ply = 0 then rootScore.[i] <- worst
+                if ply = 0 then rootScore[i] <- worst
                 if worst > best then
                     best <- worst
                     bestI <- i
@@ -415,14 +408,14 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                 else i <- i + 1
 
         if ordering && not aborted && nm > 1 then
-            let d = mine.[bestI]
+            let d = mine[bestI]
             let i4 = myHead0 * 4 + int d
-            histMe.[i4] <- histMe.[i4] + depth * depth
+            histMe[i4] <- histMe[i4] + depth * depth
 
         if ordering && not aborted && ply > 0 && not relaxed then
             // Same position: keep the deeper result (it may come from pondering, i.e. an older search).
             // Other position: keep the deeper entry of the current search, entries of older searches can go.
-            let e = &tt.[slot]
+            let e = &tt[slot]
             let check = uint32 (hash >>> 32)
             let old = e.Key ^^^ e.Data
 
@@ -439,7 +432,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                     (uint64 check <<< 32)
                     ||| (uint64 (byte depth) <<< 24)
                     ||| (uint64 flag <<< 16)
-                    ||| (uint64 (byte mine.[bestI]) <<< 8)
+                    ||| (uint64 (byte mine[bestI]) <<< 8)
                     ||| uint64 age
 
                 e.Data <- data
@@ -448,11 +441,11 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
         best
 
     /// Searches until the Stopwatch timestamp `stopAt`. Always returns a legal move, even with no time at all.
-    /// Iterative deepening from depth 1 over the root moves in myMoves.[0] (nm > 1), until the deadline,
+    /// Iterative deepening from depth 1 over the root moves in myMoves[0] (nm > 1), until the deadline,
     /// a proven result or maxDepth.
     member private this.Deepen(nm: int) : SearchInfo =
-        let mine = myMoves.[0]
-        let mutable result = { Move = mine.[0]; Depth = 0; Score = 0.0; Nodes = 0L; Relaxed = relaxed }
+        let mine = myMoves[0]
+        let mutable result = { Move = mine[0]; Depth = 0; Score = 0.0; Nodes = 0L; Relaxed = relaxed }
         let mutable depth = if helper % 2 = 1 then 2 else 1
         let mutable fin = false
 
@@ -461,13 +454,13 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
           let skip =
               diversity = 2 && helper > 0
               && (let k = (helper - 1) % 20
-                  ((depth + Searcher.SkipPhase.[k]) / Searcher.SkipSize.[k]) % 2 = 1)
+                  ((depth + Searcher.SkipPhase[k]) / Searcher.SkipSize[k]) % 2 = 1)
 
           if skip then
               depth <- depth + 1
           else
             for i in 0 .. nm - 1 do
-                rootScore.[i] <- Double.NegativeInfinity
+                rootScore[i] <- Double.NegativeInfinity
 
             let v = this.Max(0, depth, Double.NegativeInfinity, Double.PositiveInfinity, nm)
 
@@ -476,16 +469,16 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
             let mutable bi = -1
 
             for i in 0 .. nm - 1 do
-                if rootScore.[i] > Double.NegativeInfinity && (bi < 0 || rootScore.[i] > rootScore.[bi]) then
+                if rootScore[i] > Double.NegativeInfinity && (bi < 0 || rootScore[i] > rootScore[bi]) then
                     bi <- i
 
             // Partial iterations are only usable once the previous best (searched first) has an exact score;
             // any move that beat it afterwards is exact as well. Otherwise moves were compared at different depths.
-            if bi >= 0 && (not aborted || rootScore.[0] > Double.NegativeInfinity) then
+            if bi >= 0 && (not aborted || rootScore[0] > Double.NegativeInfinity) then
                 result <-
-                    { Move = mine.[bi]
+                    { Move = mine[bi]
                       Depth = (if aborted then result.Depth else depth)
-                      Score = rootScore.[bi]
+                      Score = rootScore[bi]
                       Nodes = nodes
                       Relaxed = relaxed }
 
@@ -494,16 +487,16 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
             else
                 // Re-order: best first, the rest by score (stable insertion sort on 4 items)
                 for i in 1 .. nm - 1 do
-                    let s, m = rootScore.[i], mine.[i]
+                    let s, m = rootScore[i], mine[i]
                     let mutable j = i - 1
 
-                    while j >= 0 && rootScore.[j] < s do
-                        rootScore.[j + 1] <- rootScore.[j]
-                        mine.[j + 1] <- mine.[j]
+                    while j >= 0 && rootScore[j] < s do
+                        rootScore[j + 1] <- rootScore[j]
+                        mine[j + 1] <- mine[j]
                         j <- j - 1
 
-                    rootScore.[j + 1] <- s
-                    mine.[j + 1] <- m
+                    rootScore[j + 1] <- s
+                    mine[j + 1] <- m
 
                 // Proven win or loss: deeper search cannot change the outcome
                 if abs v > win / 2.0 then fin <- true
@@ -528,19 +521,19 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
         maxDepth <- limits.Depth
         nodes <- 0L
         aborted <- false
-        boards.[0].CopyFrom root
+        boards[0].CopyFrom root
 
         if ownTable then table.Age <- table.Age + 1uy
         age <- table.Age
 
         // Old history still says something about this game, but recent results should dominate
         for i in 0 .. histMe.Length - 1 do
-            histMe.[i] <- histMe.[i] >>> 2
-            histOpp.[i] <- histOpp.[i] >>> 2
+            histMe[i] <- histMe[i] >>> 2
+            histOpp[i] <- histOpp[i] >>> 2
 
-        let mine = myMoves.[0]
-        let nm = this.Gen(boards.[0], me, mine, 0)
-        let mutable result = { Move = mine.[0]; Depth = 0; Score = 0.0; Nodes = 0L; Relaxed = false }
+        let mine = myMoves[0]
+        let nm = this.Gen(boards[0], me, mine, 0)
+        let mutable result = { Move = mine[0]; Depth = 0; Score = 0.0; Nodes = 0L; Relaxed = false }
 
         if nm > 1 then
             result <- this.Deepen nm
@@ -584,28 +577,28 @@ type ParallelSearcher(geo: Geometry, maxSnakes: int, config: SearchConfig, threa
         let n = Math.Clamp(helpers, 0, workers.Length - 1)
 
         if n = 0 then
-            workers.[0].Search(root, me, limits)
+            workers[0].Search(root, me, limits)
         else
             for i in 1..n do
-                workers.[i].ResetStop()
+                workers[i].ResetStop()
 
             let tasks =
                 Array.init n (fun k ->
                     let i = k + 1
-                    Tasks.Task.Run(fun () -> results.[i] <- workers.[i].SearchCore(root, me, limits)))
+                    Tasks.Task.Run(fun () -> results[i] <- workers[i].SearchCore(root, me, limits)))
 
-            let main = workers.[0].Search(root, me, limits)
+            let main = workers[0].Search(root, me, limits)
 
             // The main thread decides when to stop (deadline or a proven result); helpers follow
             for i in 1..n do
-                workers.[i].Stop()
+                workers[i].Stop()
 
             Tasks.Task.WaitAll tasks
             let mutable best = main
             let mutable nodes = main.Nodes
 
             for i in 1..n do
-                let r = results.[i]
+                let r = results[i]
                 nodes <- nodes + r.Nodes
                 // A helper that completed a deeper iteration in the same mode knows more than the main thread
                 if r.Relaxed = main.Relaxed && r.Depth > best.Depth then best <- r

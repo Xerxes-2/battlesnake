@@ -8,51 +8,53 @@ module Snake.Server.Clock
 open System
 open System.Collections.Concurrent
 
-/// Per game: network estimate and our compute time last turn, in ms (NaN = not known yet).
-type private GameClock = { Net: float; LastCompute: float }
+open Snake.Engine
+
+/// Per game: network estimate and our compute time last turn (NaN = not known yet).
+type private GameClock = { Net: float<ms>; LastCompute: float<ms> }
+
+let private unknown: float<ms> = LanguagePrimitives.FloatWithMeasure nan
+let private known (t: float<ms>) = not (Double.IsNaN(float t))
 
 let private games = ConcurrentDictionary<string, GameClock>()
 
-let private envFloat name (dflt: float) =
-    match Environment.GetEnvironmentVariable name with
-    | null -> dflt
-    | v ->
-        match Double.TryParse v with
-        | true, x -> x
-        | _ -> dflt
+let private envMs name (dflt: float<ms>) =
+    match Double.TryParse(Environment.GetEnvironmentVariable name) with
+    | true, x -> x * 1.0<ms>
+    | _ -> dflt
 
 /// Network estimate before any measurement: a fresh TCP connection Sydney <-> Oregon is ~2 x 165ms.
-let firstTurnNet = envFloat "SNAKE_FIRST_NET_MS" 330.0
+let firstTurnNet = envMs "SNAKE_FIRST_NET_MS" 330.0<ms>
 /// Covers GC, scheduling jitter and the time between our clock stopping and the bytes leaving the box.
-let margin = envFloat "SNAKE_MARGIN_MS" 80.0
+let margin = envMs "SNAKE_MARGIN_MS" 80.0<ms>
 
 /// The network estimate after the engine reported `latency` (ms, as sent) for a turn we computed for
 /// `lastCompute` ms: spikes are adopted at once, improvements decay in.
-let updateNet (net: float) (lastCompute: float) (latency: string) =
+let updateNet (net: float<ms>) (lastCompute: float<ms>) (latency: string) =
     match Int32.TryParse latency with
-    | true, l when l > 0 && not (Double.IsNaN lastCompute) ->
-        let measured = max 0.0 (float l - lastCompute)
-        if Double.IsNaN net || measured > net then measured else 0.5 * net + 0.5 * measured
+    | true, l when l > 0 && known lastCompute ->
+        let measured = max 0.0<ms> (float l * 1.0<ms> - lastCompute)
+        if not (known net) || measured > net then measured else 0.5 * net + 0.5 * measured
     | _ -> net
 
-/// Search time in ms for an estimated network time (NaN = unknown) and the engine's timeout (0 = default 500).
-let budgetFor (net: float) (timeout: int) =
-    let net = if Double.IsNaN net then firstTurnNet else net
-    let timeout = if timeout > 0 then float timeout else 500.0
-    Math.Clamp(timeout - net - margin, 10.0, timeout - 50.0), net
+/// Search time for an estimated network time (NaN = unknown) and the engine's timeout in ms (0 = default 500).
+let budgetFor (net: float<ms>) (timeout: int) =
+    let net = if known net then net else firstTurnNet
+    let timeout = if timeout > 0 then float timeout * 1.0<ms> else 500.0<ms>
+    min (timeout - 50.0<ms>) (max 10.0<ms> (timeout - net - margin)), net
 
-/// Search time in milliseconds for this turn, and the network estimate it assumed.
+/// Search time for this turn, and the network estimate it assumed.
 let budget (gameId: string) (timeout: int) (latency: string) =
     if games.Count > 10_000 then games.Clear() // games whose /end never arrived
 
-    let c = games.GetOrAdd(gameId, fun _ -> { Net = nan; LastCompute = nan })
+    let c = games.GetOrAdd(gameId, fun _ -> { Net = unknown; LastCompute = unknown })
     let c = { c with Net = updateNet c.Net c.LastCompute latency }
-    games.[gameId] <- c
+    games[gameId] <- c
     budgetFor c.Net timeout
 
-let record (gameId: string) (computeMs: float) =
+let record (gameId: string) (computeMs: float<ms>) =
     match games.TryGetValue gameId with
-    | true, c -> games.[gameId] <- { c with LastCompute = computeMs }
+    | true, c -> games[gameId] <- { c with LastCompute = computeMs }
     | _ -> ()
 
 let finish (gameId: string) = games.TryRemove gameId |> ignore

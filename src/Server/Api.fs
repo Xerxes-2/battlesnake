@@ -1,5 +1,7 @@
 /// Data types for the Battlesnake API (https://docs.battlesnake.com/api), plus conversion to the engine's internal state.
 /// Only records are used, so the default System.Text.Json (web defaults: camelCase, case-insensitive) is enough.
+/// Fields the engine may leave out are typed `| null` (nullness checking is on for this project), so the compiler
+/// makes every use of them deal with the missing case.
 module Snake.Server.Api
 
 open System.Collections.Concurrent
@@ -27,11 +29,11 @@ type RulesetSettings =
 type Ruleset =
     { Name: string
       Version: string
-      Settings: RulesetSettings }
+      Settings: RulesetSettings | null }
 
 type Game =
     { Id: string
-      Ruleset: Ruleset
+      Ruleset: Ruleset | null
       Map: string
       Timeout: int
       Source: string }
@@ -39,9 +41,9 @@ type Game =
 type BoardDto =
     { Height: int
       Width: int
-      Food: Coord[]
-      Hazards: Coord[]
-      Snakes: SnakeDto[] }
+      Food: Coord[] | null
+      Hazards: Coord[] | null
+      Snakes: SnakeDto[] | null }
 
 type GameState =
     { Game: Game
@@ -53,11 +55,13 @@ type GameState =
 /// SourceRevisionId; local builds get the full git sha from the SDK, shortened here to match.
 let version =
     let v =
-        Assembly.GetEntryAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>().InformationalVersion
+        match typeof<Coord>.Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>() with
+        | NonNull a -> a.InformationalVersion
+        | Null -> "unknown"
 
     // Only a full 40-char sha gets shortened; "abc1234-dirty" from a dirty flake tree stays as is
     match v.IndexOf '+' with
-    | i when i >= 0 && v.Length - i - 1 = 40 -> v.[.. i + 7]
+    | i when i >= 0 && v.Length - i - 1 = 40 -> v[.. i + 7]
     | _ -> v
 
 let info =
@@ -73,17 +77,28 @@ let private geometries = ConcurrentDictionary<struct (int * int), Geometry>()
 let geometry w h =
     geometries.GetOrAdd(struct (w, h), fun struct (w, h) -> Geometry(w, h))
 
+/// An array field the engine left out counts as empty.
+let orEmpty (a: 'T[] | null) =
+    match a with
+    | Null -> [||]
+    | NonNull a -> a
+
+let rulesetName (g: Game) =
+    match g.Ruleset with
+    | NonNull r -> r.Name
+    | Null -> "?"
+
 /// Converts the request into the engine state, putting "you" at index 0. Returns (board, my index).
 let toBoard (gs: GameState) : Board * int =
     let bd = gs.Board
     let geo = geometry bd.Width bd.Height
-    let snakes = if isNull bd.Snakes then [||] else bd.Snakes
+    let snakes = orEmpty bd.Snakes
     let b = Board(geo, max 1 snakes.Length)
     b.Turn <- gs.Turn
 
-    if not (obj.ReferenceEquals(gs.Game.Ruleset, null))
-       && not (obj.ReferenceEquals(gs.Game.Ruleset.Settings, null)) then
-        b.HazardDamage <- gs.Game.Ruleset.Settings.HazardDamagePerTurn
+    match gs.Game.Ruleset with
+    | NonNull { Settings = NonNull st } -> b.HazardDamage <- st.HazardDamagePerTurn
+    | _ -> ()
 
     let cell (p: Coord) = geo.Cell(p.X, p.Y)
     let add (s: SnakeDto) = b.AddSnake(s.Health, s.Body |> Array.map cell) |> ignore
@@ -94,12 +109,10 @@ let toBoard (gs: GameState) : Board * int =
     for s in snakes do
         if s.Id <> gs.You.Id then add s
 
-    if not (isNull bd.Food) then
-        for f in bd.Food do
-            b.SetFood(cell f, true)
+    for f in orEmpty bd.Food do
+        b.SetFood(cell f, true)
 
-    if not (isNull bd.Hazards) then
-        for h in bd.Hazards do
-            b.AddHazard(cell h)
+    for h in orEmpty bd.Hazards do
+        b.AddHazard(cell h)
 
     b, 0

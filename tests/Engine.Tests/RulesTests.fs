@@ -180,12 +180,12 @@ let ``incremental hash matches a from-scratch hash`` () =
 
         while b.AliveCount >= 1 && b.Turn < 200 do
             for s in 0..3 do
-                moves.[s] <- enum<Dir> (rng.Next 4)
+                moves[s] <- enum<Dir> (rng.Next 4)
                 // Usually dodge, sometimes not, so all death causes happen
                 if rng.Next 10 > 0 then
                     for _ in 1..3 do
-                        let nb = geo.Neighbor(b.Head s, moves.[s])
-                        if nb < 0 || b.Occupancy nb > 0 then moves.[s] <- enum<Dir> (rng.Next 4)
+                        let nb = geo.Neighbor(b.Head s, moves[s])
+                        if nb < 0 || b.Occupancy nb > 0 then moves[s] <- enum<Dir> (rng.Next 4)
 
             b.Step moves
             if rng.Next 100 < 30 then b.SetFood(rng.Next geo.Cells, true)

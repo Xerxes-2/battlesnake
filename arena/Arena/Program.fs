@@ -47,7 +47,7 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
 
     match spec.Split(':') with
     | [| "base" |] -> Policy.create geo maxSnakes
-    | [| "search"; ms |] -> searcher geo maxSnakes cfg (fun () -> Limits.forMs (float ms))
+    | [| "search"; ms |] -> searcher geo maxSnakes cfg (fun () -> Limits.forMs (float ms * 1.0<ms>))
     | [| "nodes"; n |] -> searcher geo maxSnakes cfg (nodes n)
     // move ordering hints only, no score reuse
     | [| "hint"; n |] -> searcher geo maxSnakes { cfg with UseScores = false } (nodes n)
@@ -69,7 +69,7 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
     | [| "smp"; ms; t; div |] ->
         // Lazy SMP with t threads for ms per move
         let ps = ParallelSearcher(geo, maxSnakes, { cfg with Diversity = int div }, int t)
-        fun b s -> count (ps.Search(b, s, Limits.forMs (float ms), int t - 1))
+        fun b s -> count (ps.Search(b, s, Limits.forMs (float ms * 1.0<ms>), int t - 1))
     | _ -> failwith $"unknown bot {spec}"
 
 /// `@...` overrides single weights on top of the mode's shipped ones (before 0.7.4 bots without @ played the
@@ -79,14 +79,14 @@ let makeBot geo maxSnakes (spec: string) =
 
     match spec.IndexOf '@' with
     | -1 -> makeBotW geo maxSnakes spec basis
-    | i -> makeBotW geo maxSnakes spec.[.. i - 1] (Weights.parseOver basis (readText spec.[i + 1 ..]))
+    | i -> makeBotW geo maxSnakes spec[.. i - 1] (Weights.parseOver basis (readText spec[i + 1 ..]))
 
 let shuffle (rng: Random) (a: 'T[]) =
     for i in a.Length - 1 .. -1 .. 1 do
         let j = rng.Next(i + 1)
-        let t = a.[i]
-        a.[i] <- a.[j]
-        a.[j] <- t
+        let t = a[i]
+        a[i] <- a[j]
+        a[j] <- t
 
 /// Official PlaceSnakesFixed + PlaceFoodFixed for an 11x11 board.
 let setup (rng: Random) (n: int) =
@@ -100,14 +100,14 @@ let setup (rng: Random) (n: int) =
     let starts = if rng.Next 2 = 0 then Array.append corners cardinals else Array.append cardinals corners
 
     for s in 0 .. n - 1 do
-        let c = geo.Cell starts.[s]
+        let c = geo.Cell starts[s]
         b.AddSnake(100, [| c; c; c |]) |> ignore
 
     // One food diagonal to each head, away from the centre on at least one axis, never centre or corner
     let cx, cy = 5, 5
 
     for s in 0 .. n - 1 do
-        let hx, hy = starts.[s]
+        let hx, hy = starts[s]
 
         let options =
             [| (hx - 1, hy - 1); (hx - 1, hy + 1); (hx + 1, hy - 1); (hx + 1, hy + 1) |]
@@ -118,7 +118,7 @@ let setup (rng: Random) (n: int) =
                 && not ((px = 0 || px = 10) && (py = 0 || py = 10)))
 
         if options.Length > 0 then
-            b.SetFood(geo.Cell options.[rng.Next options.Length], true)
+            b.SetFood(geo.Cell options[rng.Next options.Length], true)
 
     b.SetFood(geo.Cell(cx, cy), true)
     b
@@ -139,13 +139,13 @@ let spawnFood (b: Board) (rng: Random) =
             if b.Alive s then
                 for d in Dir.all do
                     let nb = geo.Neighbor(b.Head s, d)
-                    if nb >= 0 then blocked.[nb] <- true
+                    if nb >= 0 then blocked[nb] <- true
 
         let free =
             [| for c in 0 .. geo.Cells - 1 do
-                   if b.Occupancy c = 0 && not (b.IsFood c) && not blocked.[c] then c |]
+                   if b.Occupancy c = 0 && not (b.IsFood c) && not blocked[c] then c |]
 
-        if free.Length > 0 then b.SetFood(free.[rng.Next free.Length], true)
+        if free.Length > 0 then b.SetFood(free[rng.Next free.Length], true)
 
 /// Plays one game; returns the winning seat (-1 = draw) and the number of turns.
 let playBots (bots: Bot[]) (seed: int) =
@@ -156,7 +156,7 @@ let playBots (bots: Bot[]) (seed: int) =
 
     while b.AliveCount > 1 && b.Turn < 1000 do
         for s in 0 .. n - 1 do
-            if b.Alive s then moves.[s] <- bots.[s] b s
+            if b.Alive s then moves[s] <- bots[s] b s
 
         b.Step moves
         spawnFood b rng
@@ -171,7 +171,7 @@ let playBots (bots: Bot[]) (seed: int) =
 
 let opt (argv: string[]) name dflt =
     match Array.tryFindIndex ((=) name) argv with
-    | Some i when i + 1 < argv.Length -> argv.[i + 1]
+    | Some i when i + 1 < argv.Length -> argv[i + 1]
     | _ -> dflt
 
 /// Seat layout: duel = A B, standard = A B A B; `flip` swaps A and B so both sides get both start orders.
@@ -190,14 +190,14 @@ let scoreToElo (s: float) = -400.0 * Math.Log10(1.0 / Math.Clamp(s, 1e-6, 1.0 - 
 type PairStats() =
     let counts = Array.zeroCreate<int> 5 // pair points for A in half-points: 0..4
 
-    member _.Add(halfPoints: int) = counts.[halfPoints] <- counts.[halfPoints] + 1
+    member _.Add(halfPoints: int) = counts[halfPoints] <- counts[halfPoints] + 1
     member _.Pairs = Array.sum counts
     member _.Counts = counts
 
     /// Mean and variance of the pair score with 0.5 pseudo-pairs per outcome: without them a short run of
     /// identical pairs has zero variance and the LLR explodes. Pulls towards 50%, i.e. errs on the safe side.
     member this.MeanVar() =
-        let c k = float counts.[k] + 0.5
+        let c k = float counts[k] + 0.5
         let n = Seq.sum (Seq.init 5 c)
         let mean = (Seq.sum (Seq.init 5 (fun k -> c k * float k / 4.0))) / n
         let var = (Seq.sum (Seq.init 5 (fun k -> c k * (float k / 4.0 - mean) ** 2.0))) / n
@@ -221,14 +221,14 @@ type PairStats() =
 /// vs H1: elo >= elo1 (alpha = beta = 0.05) and stops as soon as it decides; --games is the cap.
 /// --fixed plays exactly --games games.
 let runMatch (argv: string[]) =
-    let a, bSpec = argv.[1], argv.[2]
+    let a, bSpec = argv[1], argv[2]
     let mode = opt argv "--mode" "duel"
     let fixedN = argv |> Array.contains "--fixed"
     let games = (int (opt argv "--games" (if fixedN then "100" else "2000")) + 1) / 2 * 2
     let par = int (opt argv "--par" (string Environment.ProcessorCount))
     let seed0 = int (opt argv "--seed" "1")
     let bounds = (opt argv "--sprt" "0,20").Split(',') |> Array.map float
-    let elo0, elo1 = bounds.[0], bounds.[1]
+    let elo0, elo1 = bounds[0], bounds[1]
     let lower, upper = Math.Log(0.05 / 0.95), Math.Log(0.95 / 0.05)
     let stats = PairStats()
     let results = Array.create games -1 // per game: half-points for A (0, 1, 2), -1 = not finished
@@ -257,17 +257,17 @@ let runMatch (argv: string[]) =
             let isA = seats mode flip true false
             let bots = specs |> Array.map (makeBot geo11 specs.Length)
             let w, t = playBots bots (seed0 * 100_003 + g / 2)
-            let r = if w < 0 || a = bSpec then 1 elif isA.[w] then 2 else 0
+            let r = if w < 0 || a = bSpec then 1 elif isA[w] then 2 else 0
 
             lock stats (fun () ->
                 turns <- turns + int64 t
                 played <- played + 1
-                results.[g] <- r
+                results[g] <- r
                 if r = 2 then winsA <- winsA + 1
                 elif r = 0 then winsB <- winsB + 1
                 else draws <- draws + 1
 
-                let other = results.[g ^^^ 1]
+                let other = results[g ^^^ 1]
 
                 // Once decided, later finishers are not counted, so the report matches the decision
                 if other >= 0 && not stop then
@@ -329,15 +329,15 @@ let runTune (argv: string[]) =
         Parallel.For(0, batch * 2, ParallelOptions(MaxDegreeOfParallelism = par), fun j ->
             let i = j / 2
             let flip = j % 2 = 1
-            let plus = Weights.ofArray (Array.init k (fun p -> Math.Clamp(snapshot.[p] + c.[p] * deltas.[i].[p], lo.[p], hi.[p])))
-            let minus = Weights.ofArray (Array.init k (fun p -> Math.Clamp(snapshot.[p] - c.[p] * deltas.[i].[p], lo.[p], hi.[p])))
+            let plus = Weights.ofArray (Array.init k (fun p -> Math.Clamp(snapshot[p] + c[p] * deltas[i][p], lo[p], hi[p])))
+            let minus = Weights.ofArray (Array.init k (fun p -> Math.Clamp(snapshot[p] - c[p] * deltas[i][p], lo[p], hi[p])))
             let ws = seats mode flip plus minus
             let isPlus = seats mode flip true false
             let bots = ws |> Array.map (fun w -> makeBotW geo11 ws.Length ("nodes:" + nodes) w)
-            let w, _ = playBots bots seeds.[i]
-            let r = if w < 0 then 0.0 elif isPlus.[w] then 1.0 else -1.0
+            let w, _ = playBots bots seeds[i]
+            let r = if w < 0 then 0.0 elif isPlus[w] then 1.0 else -1.0
             // Two writers per slot (the pair); lock-free add on doubles is not available, so use a lock
-            lock results (fun () -> results.[i] <- results.[i] + r))
+            lock results (fun () -> results[i] <- results[i] + r))
         |> ignore
 
         // Decay learning rate slowly, as usual for SPSA
@@ -347,9 +347,9 @@ let runTune (argv: string[]) =
             let mutable g = 0.0
 
             for i in 0 .. batch - 1 do
-                g <- g + results.[i] * deltas.[i].[p]
+                g <- g + results[i] * deltas[i][p]
 
-            theta.[p] <- Math.Clamp(theta.[p] + a * c.[p] * g / float batch * 2.0, lo.[p], hi.[p])
+            theta[p] <- Math.Clamp(theta[p] + a * c[p] * g / float batch * 2.0, lo[p], hi[p])
 
         let decisive = results |> Array.sumBy abs
         File.WriteAllText(out, (Weights.format (Weights.ofArray theta)).Replace(",", "\n") + "\n")
@@ -390,9 +390,9 @@ let runReuse (argv: string[]) =
             if ponder then
                 persistent.Search(b, 0, Limits.depth (d + 1)) |> ignore
 
-            mv.[0] <- rf.Move
+            mv[0] <- rf.Move
             for s in 1 .. n - 1 do
-                if b.Alive s then mv.[s] <- bots.[s] b s
+                if b.Alive s then mv[s] <- bots[s] b s
 
             b.Step mv
             spawnFood b rng
@@ -422,22 +422,22 @@ let runDepth (argv: string[]) =
         while b.AliveCount > 1 && b.Turn < 300 && b.Alive 0 do
             let r =
                 Array.init 3 (fun i ->
-                    let s = if i = 0 then Searcher(geo11, n, cfg) else sr.[i]
+                    let s = if i = 0 then Searcher(geo11, n, cfg) else sr[i]
                     s.Search(b, 0, Limits.nodes nodes))
 
             for i in 0..2 do
-                sum.[i] <- sum.[i] + int64 r.[i].Depth
+                sum[i] <- sum[i] + int64 r[i].Depth
 
             turns <- turns + 1
-            sr.[2].Search(b, 0, Limits.nodes p) |> ignore
-            mv.[0] <- r.[1].Move
+            sr[2].Search(b, 0, Limits.nodes p) |> ignore
+            mv[0] <- r[1].Move
             for s in 1 .. n - 1 do
-                if b.Alive s then mv.[s] <- bots.[s] b s
+                if b.Alive s then mv[s] <- bots[s] b s
 
             b.Step mv
             spawnFood b rng
 
-    let avg i = float sum.[i] / float turns
+    let avg i = float sum[i] / float turns
     printfn "%s nodes=%d ponder=%d, %d turns: avg depth fresh %.2f, persistent %.2f, +ponder %.2f" mode nodes p turns (avg 0) (avg 1) (avg 2)
     0
 
@@ -445,10 +445,10 @@ let runDepth (argv: string[]) =
 let main argv =
     match argv with
     | [||] -> eprintfn "usage: Arena match <botA> <botB> ... | Arena tune ..."; 2
-    | _ when argv.[0] = "match" -> runMatch argv
-    | _ when argv.[0] = "tune" -> runTune argv
-    | _ when argv.[0] = "reuse" -> runReuse argv
-    | _ when argv.[0] = "depth" -> runDepth argv
-    | _ when argv.[0] = "texel" -> Texel.run argv; 0
-    | _ when argv.[0] = "features" -> Texel.dump argv; 0
+    | _ when argv[0] = "match" -> runMatch argv
+    | _ when argv[0] = "tune" -> runTune argv
+    | _ when argv[0] = "reuse" -> runReuse argv
+    | _ when argv[0] = "depth" -> runDepth argv
+    | _ when argv[0] = "texel" -> Texel.run argv; 0
+    | _ when argv[0] = "features" -> Texel.dump argv; 0
     | _ -> runMatch (Array.append [| "match" |] argv)
