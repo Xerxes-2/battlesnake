@@ -7,32 +7,36 @@ open System.Threading
 /// Result of one search: the chosen move, the deepest fully completed depth, the score and the node count.
 [<Struct>]
 type SearchInfo =
-    { Move: Dir
-      Depth: int
-      Score: float
-      Nodes: int64
-      /// The paranoid search saw only losses, Move/Depth/Score come from the nearest-opponent-only re-search
-      Relaxed: bool }
+    {
+        Move: Dir
+        Depth: int
+        Score: float
+        Nodes: int64
+        /// The paranoid search saw only losses, Move/Depth/Score come from the nearest-opponent-only re-search
+        Relaxed: bool
+    }
 
 /// How a Searcher plays; fixed for its lifetime. The defaults (SearchConfig.make) are what ships; the switches exist
 /// for tests and arena A/B comparisons.
 type SearchConfig =
-    { Weights: Weights
-      /// Move ordering (TT hint + history); off = the plain fixed order
-      Ordering: bool
-      /// Reuse stored scores from the table, not just best-move hints
-      UseScores: bool
-      /// Only reuse scores stored at exactly the same remaining depth (keeps fixed-depth results identical; tests)
-      ExactDepthOnly: bool
-      /// false restores the pre-0.6.1 behaviour (far lone opponent played by Default, its deaths count as proven)
-      SoundProofs: bool
-      /// Relaxed re-search also keeps opponents within 2 steps adversarial. Off: on the ladder (0.7.1) it made the
-      /// relaxed re-search nearly as paranoid as the first, proving losses at depth ~4 and picking the move that dies
-      /// last in the worst case; Standard deaths went from 48% to 75% of games, half of them head-on.
-      RelaxNear: bool
-      /// How Lazy SMP helpers spread over depths: 0 = odd helpers start at depth 2 only; 2 = Stockfish-style depth
-      /// skipping. A1, 250 ms, 4 threads: +0.25 ply (0) vs +0.53 ply (2); rotating move order near the root was worse.
-      Diversity: int }
+    {
+        Weights: Weights
+        /// Move ordering (TT hint + history); off = the plain fixed order
+        Ordering: bool
+        /// Reuse stored scores from the table, not just best-move hints
+        UseScores: bool
+        /// Only reuse scores stored at exactly the same remaining depth (keeps fixed-depth results identical; tests)
+        ExactDepthOnly: bool
+        /// false restores the pre-0.6.1 behaviour (far lone opponent played by Default, its deaths count as proven)
+        SoundProofs: bool
+        /// Relaxed re-search also keeps opponents within 2 steps adversarial. Off: on the ladder (0.7.1) it made the
+        /// relaxed re-search nearly as paranoid as the first, proving losses at depth ~4 and picking the move that dies
+        /// last in the worst case; Standard deaths went from 48% to 75% of games, half of them head-on.
+        RelaxNear: bool
+        /// How Lazy SMP helpers spread over depths: 0 = odd helpers start at depth 2 only; 2 = Stockfish-style depth
+        /// skipping. A1, 250 ms, 4 threads: +0.25 ply (0) vs +0.53 ply (2); rotating move order near the root was worse.
+        Diversity: int
+    }
 
 module SearchConfig =
     let make (w: Weights) =
@@ -249,9 +253,10 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
         else v
 
     member private _.CheckTime() =
-        if (nodeLimit > 0L && nodes >= nodeLimit)
-           || ((nodes &&& checkMask) = 0L
-               && (Time.now () > deadline || Volatile.Read(&stopRequested))) then
+        if
+            (nodeLimit > 0L && nodes >= nodeLimit)
+            || ((nodes &&& checkMask) = 0L && (Time.now () > deadline || Volatile.Read(&stopRequested)))
+        then
             aborted <- true
 
     /// Value of boards[ply] for me with `depth` plies left, inside the window (alpha, beta).
@@ -291,154 +296,167 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
             if Double.IsNaN cut && nm > 1 then
                 this.Order(mine, 0, nm, histMe, myHead0, (if hit then int (byte (meta >>> 8)) else -1))
 
-        if not (Double.IsNaN cut) then cut else
+        if not (Double.IsNaN cut) then
+            cut
+        else
 
-        // Opponents: adversarial if their head can meet mine within the remaining plies
-        let myHead = b.Head me
-        let mx, my = geo.X myHead, geo.Y myHead
-        let advs = adv[ply]
-        let am = advMoves[ply]
-        let ac = advCount[ply]
-        let mutable na = 0
-        let mutable opps = 0
+            // Opponents: adversarial if their head can meet mine within the remaining plies
+            let myHead = b.Head me
+            let mx, my = geo.X myHead, geo.Y myHead
+            let advs = adv[ply]
+            let am = advMoves[ply]
+            let ac = advCount[ply]
+            let mutable na = 0
+            let mutable opps = 0
 
-        for s in 0 .. b.NumSnakes - 1 do
-            if s <> me && b.Alive s then opps <- opps + 1
+            for s in 0 .. b.NumSnakes - 1 do
+                if s <> me && b.Alive s then opps <- opps + 1
 
-        // Snakes moved by Default this node: their deaths are guesses, not forced (see the win case below)
-        let mutable simplified = false
-        let mutable nearest = -1
+            // Snakes moved by Default this node: their deaths are guesses, not forced (see the win case below)
+            let mutable simplified = false
+            let mutable nearest = -1
 
-        if relaxed then
-            let mutable bd = Int32.MaxValue
+            if relaxed then
+                let mutable bd = Int32.MaxValue
+
+                for s in 0 .. b.NumSnakes - 1 do
+                    if s <> me && b.Alive s then
+                        let h = b.Head s
+                        let dist = abs (geo.X h - mx) + abs (geo.Y h - my)
+
+                        if dist < bd then
+                            bd <- dist
+                            nearest <- s
 
             for s in 0 .. b.NumSnakes - 1 do
                 if s <> me && b.Alive s then
                     let h = b.Head s
                     let dist = abs (geo.X h - mx) + abs (geo.Y h - my)
-                    if dist < bd then
-                        bd <- dist
-                        nearest <- s
 
-        for s in 0 .. b.NumSnakes - 1 do
-            if s <> me && b.Alive s then
-                let h = b.Head s
-                let dist = abs (geo.X h - mx) + abs (geo.Y h - my)
-
-                // A lone opponent is always searched: 1v1 the whole board is the fight (its space is our space),
-                // and a far opponent walking into a dead end under Default produced fake forced wins (game 60b3aa33).
-                if (not relaxed || s = nearest || (relaxNear && dist <= 2)) && ((soundProofs && opps = 1) || dist <= 2 * depth) then
-                    advs[na] <- s
-                    ac[na] <- this.Gen(b, s, am, na * 4)
-                    if ordering && ac[na] > 1 then this.Order(am, na * 4, ac[na], histOpp, h, -1)
-                    na <- na + 1
-                else
-                    mv[s] <- this.Default(b, s)
-                    simplified <- true
-
-        let od = odo[ply]
-        let child = boards[ply + 1]
-        let mutable best = Double.NegativeInfinity
-        let mutable bestI = 0
-        let mutable i = 0
-
-        while i < nm && not aborted do
-            mv[me] <- mine[i]
-            let a = max alpha best
-            let mutable worst = Double.PositiveInfinity
-            Array.Clear(od, 0, na)
-            let mutable fin = false
-
-            while not fin do
-                for j in 0 .. na - 1 do
-                    mv[advs[j]] <- am[j * 4 + od[j]]
-
-                child.CopyFrom b
-                child.Step mv
-                nodes <- nodes + 1L
-                this.CheckTime()
-
-                let v =
-                    if not (child.Alive me) then
-                        // Dying later is better: gives the opponents more chances to blunder
-                        -win + float ply
-                    elif child.NumSnakes > 1 && child.AliveCount = 1 then
-                        // Only proven if every opponent that died this step was searched. A Default snake dying is
-                        // likely, not forced: score it high but below win / 2 so it neither ends the iterative
-                        // deepening nor counts as a proof in the TT.
-                        if simplified && soundProofs then likelyWin - float ply else win - float ply
-                    elif depth = 1 then
-                        Eval.evaluate weights territory child me
+                    // A lone opponent is always searched: 1v1 the whole board is the fight (its space is our space),
+                    // and a far opponent walking into a dead end under Default produced fake forced wins (game 60b3aa33).
+                    if
+                        (not relaxed || s = nearest || (relaxNear && dist <= 2))
+                        && ((soundProofs && opps = 1) || dist <= 2 * depth)
+                    then
+                        advs[na] <- s
+                        ac[na] <- this.Gen(b, s, am, na * 4)
+                        if ordering && ac[na] > 1 then this.Order(am, na * 4, ac[na], histOpp, h, -1)
+                        na <- na + 1
                     else
-                        this.Max(ply + 1, depth - 1, a, min beta worst, 0)
+                        mv[s] <- this.Default(b, s)
+                        simplified <- true
 
-                if v < worst then worst <- v
+            let od = odo[ply]
+            let child = boards[ply + 1]
+            let mutable best = Double.NegativeInfinity
+            let mutable bestI = 0
+            let mutable i = 0
 
-                if worst <= a || aborted then
-                    // This move cannot beat what we already have; credit the opponents' refutation
-                    if ordering && not aborted && depth > 1 then
-                        for j in 0 .. na - 1 do
-                            let s = advs[j]
-                            let i4 = b.Head s * 4 + int mv[s]
-                            histOpp[i4] <- histOpp[i4] + depth * depth
+            while i < nm && not aborted do
+                mv[me] <- mine[i]
+                let a = max alpha best
+                let mutable worst = Double.PositiveInfinity
+                Array.Clear(od, 0, na)
+                let mutable fin = false
 
-                    fin <- true
-                else
-                    let mutable j = 0
-                    let mutable carry = true
+                while not fin do
+                    for j in 0 .. na - 1 do
+                        mv[advs[j]] <- am[j * 4 + od[j]]
 
-                    while carry && j < na do
-                        od[j] <- od[j] + 1
+                    child.CopyFrom b
+                    child.Step mv
+                    nodes <- nodes + 1L
+                    this.CheckTime()
 
-                        if od[j] = ac[j] then
-                            od[j] <- 0
-                            j <- j + 1
+                    let v =
+                        if not (child.Alive me) then
+                            // Dying later is better: gives the opponents more chances to blunder
+                            -win + float ply
+                        elif child.NumSnakes > 1 && child.AliveCount = 1 then
+                            // Only proven if every opponent that died this step was searched. A Default snake dying is
+                            // likely, not forced: score it high but below win / 2 so it neither ends the iterative
+                            // deepening nor counts as a proof in the TT.
+                            if simplified && soundProofs then likelyWin - float ply else win - float ply
+                        elif depth = 1 then
+                            Eval.evaluate weights territory child me
                         else
-                            carry <- false
+                            this.Max(ply + 1, depth - 1, a, min beta worst, 0)
 
-                    if carry then fin <- true
+                    if v < worst then worst <- v
 
-            if not aborted then
-                if ply = 0 then rootScore[i] <- worst
-                if worst > best then
-                    best <- worst
-                    bestI <- i
+                    if worst <= a || aborted then
+                        // This move cannot beat what we already have; credit the opponents' refutation
+                        if ordering && not aborted && depth > 1 then
+                            for j in 0 .. na - 1 do
+                                let s = advs[j]
+                                let i4 = b.Head s * 4 + int mv[s]
+                                histOpp[i4] <- histOpp[i4] + depth * depth
 
-                if best >= beta then i <- nm // cut-off
-                else i <- i + 1
+                        fin <- true
+                    else
+                        let mutable j = 0
+                        let mutable carry = true
 
-        if ordering && not aborted && nm > 1 then
-            let d = mine[bestI]
-            let i4 = myHead0 * 4 + int d
-            histMe[i4] <- histMe[i4] + depth * depth
+                        while carry && j < na do
+                            od[j] <- od[j] + 1
 
-        if ordering && not aborted && ply > 0 && not relaxed then
-            // Same position: keep the deeper result (it may come from pondering, i.e. an older search).
-            // Other position: keep the deeper entry of the current search, entries of older searches can go.
-            let e = &tt[slot]
-            let check = uint32 (hash >>> 32)
-            let old = e.Key ^^^ e.Data
+                            if od[j] = ac[j] then
+                                od[j] <- 0
+                                j <- j + 1
+                            else
+                                carry <- false
 
-            let keep =
-                byte (old >>> 16) <> 0uy
-                && depth < int (byte (old >>> 24))
-                && (uint32 (old >>> 32) = check || byte old = age)
+                        if carry then fin <- true
 
-            if not keep then
-                let flag = if best <= alpha then 3uy elif best >= beta then 2uy else 1uy
-                let data = BitConverter.DoubleToUInt64Bits(Searcher.ToTT(best, ply))
+                if not aborted then
+                    if ply = 0 then rootScore[i] <- worst
 
-                let meta =
-                    (uint64 check <<< 32)
-                    ||| (uint64 (byte depth) <<< 24)
-                    ||| (uint64 flag <<< 16)
-                    ||| (uint64 (byte mine[bestI]) <<< 8)
-                    ||| uint64 age
+                    if worst > best then
+                        best <- worst
+                        bestI <- i
 
-                e.Data <- data
-                e.Key <- meta ^^^ data
+                    if best >= beta then
+                        i <- nm // cut-off
+                    else
+                        i <- i + 1
 
-        best
+            if ordering && not aborted && nm > 1 then
+                let d = mine[bestI]
+                let i4 = myHead0 * 4 + int d
+                histMe[i4] <- histMe[i4] + depth * depth
+
+            if ordering && not aborted && ply > 0 && not relaxed then
+                // Same position: keep the deeper result (it may come from pondering, i.e. an older search).
+                // Other position: keep the deeper entry of the current search, entries of older searches can go.
+                let e = &tt[slot]
+                let check = uint32 (hash >>> 32)
+                let old = e.Key ^^^ e.Data
+
+                let keep =
+                    byte (old >>> 16) <> 0uy
+                    && depth < int (byte (old >>> 24))
+                    && (uint32 (old >>> 32) = check || byte old = age)
+
+                if not keep then
+                    let flag =
+                        if best <= alpha then 3uy
+                        elif best >= beta then 2uy
+                        else 1uy
+
+                    let data = BitConverter.DoubleToUInt64Bits(Searcher.ToTT(best, ply))
+
+                    let meta =
+                        (uint64 check <<< 32)
+                        ||| (uint64 (byte depth) <<< 24)
+                        ||| (uint64 flag <<< 16)
+                        ||| (uint64 (byte mine[bestI]) <<< 8)
+                        ||| uint64 age
+
+                    e.Data <- data
+                    e.Key <- meta ^^^ data
+
+            best
 
     /// Searches until the Stopwatch timestamp `stopAt`. Always returns a legal move, even with no time at all.
     /// Iterative deepening from depth 1 over the root moves in myMoves[0] (nm > 1), until the deadline,
@@ -450,57 +468,57 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
         let mutable fin = false
 
         while not fin && depth <= min maxPly maxDepth do
-          // Stockfish's skip pattern: helper i skips some depths so threads are spread over iterations
-          let skip =
-              diversity = 2 && helper > 0
-              && (let k = (helper - 1) % 20
-                  ((depth + Searcher.SkipPhase[k]) / Searcher.SkipSize[k]) % 2 = 1)
+            // Stockfish's skip pattern: helper i skips some depths so threads are spread over iterations
+            let skip =
+                diversity = 2
+                && helper > 0
+                && (let k = (helper - 1) % 20
+                    ((depth + Searcher.SkipPhase[k]) / Searcher.SkipSize[k]) % 2 = 1)
 
-          if skip then
-              depth <- depth + 1
-          else
-            for i in 0 .. nm - 1 do
-                rootScore[i] <- Double.NegativeInfinity
-
-            let v = this.Max(0, depth, Double.NegativeInfinity, Double.PositiveInfinity, nm)
-
-            // Best fully searched move; the previous best is searched first, so even a partial
-            // iteration only switches when a move proved strictly better.
-            let mutable bi = -1
-
-            for i in 0 .. nm - 1 do
-                if rootScore[i] > Double.NegativeInfinity && (bi < 0 || rootScore[i] > rootScore[bi]) then
-                    bi <- i
-
-            // Partial iterations are only usable once the previous best (searched first) has an exact score;
-            // any move that beat it afterwards is exact as well. Otherwise moves were compared at different depths.
-            if bi >= 0 && (not aborted || rootScore[0] > Double.NegativeInfinity) then
-                result <-
-                    { Move = mine[bi]
-                      Depth = (if aborted then result.Depth else depth)
-                      Score = rootScore[bi]
-                      Nodes = nodes
-                      Relaxed = relaxed }
-
-            if aborted then
-                fin <- true
-            else
-                // Re-order: best first, the rest by score (stable insertion sort on 4 items)
-                for i in 1 .. nm - 1 do
-                    let s, m = rootScore[i], mine[i]
-                    let mutable j = i - 1
-
-                    while j >= 0 && rootScore[j] < s do
-                        rootScore[j + 1] <- rootScore[j]
-                        mine[j + 1] <- mine[j]
-                        j <- j - 1
-
-                    rootScore[j + 1] <- s
-                    mine[j + 1] <- m
-
-                // Proven win or loss: deeper search cannot change the outcome
-                if abs v > win / 2.0 then fin <- true
+            if skip then
                 depth <- depth + 1
+            else
+                for i in 0 .. nm - 1 do
+                    rootScore[i] <- Double.NegativeInfinity
+
+                let v = this.Max(0, depth, Double.NegativeInfinity, Double.PositiveInfinity, nm)
+
+                // Best fully searched move; the previous best is searched first, so even a partial
+                // iteration only switches when a move proved strictly better.
+                let mutable bi = -1
+
+                for i in 0 .. nm - 1 do
+                    if rootScore[i] > Double.NegativeInfinity && (bi < 0 || rootScore[i] > rootScore[bi]) then bi <- i
+
+                // Partial iterations are only usable once the previous best (searched first) has an exact score;
+                // any move that beat it afterwards is exact as well. Otherwise moves were compared at different depths.
+                if bi >= 0 && (not aborted || rootScore[0] > Double.NegativeInfinity) then
+                    result <-
+                        { Move = mine[bi]
+                          Depth = (if aborted then result.Depth else depth)
+                          Score = rootScore[bi]
+                          Nodes = nodes
+                          Relaxed = relaxed }
+
+                if aborted then
+                    fin <- true
+                else
+                    // Re-order: best first, the rest by score (stable insertion sort on 4 items)
+                    for i in 1 .. nm - 1 do
+                        let s, m = rootScore[i], mine[i]
+                        let mutable j = i - 1
+
+                        while j >= 0 && rootScore[j] < s do
+                            rootScore[j + 1] <- rootScore[j]
+                            mine[j + 1] <- mine[j]
+                            j <- j - 1
+
+                        rootScore[j + 1] <- s
+                        mine[j + 1] <- m
+
+                    // Proven win or loss: deeper search cannot change the outcome
+                    if abs v > win / 2.0 then fin <- true
+                    depth <- depth + 1
 
         result
 

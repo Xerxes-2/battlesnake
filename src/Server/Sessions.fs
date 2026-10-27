@@ -75,14 +75,7 @@ let search (gameId: string) (b: Board) (me: int) (stopAt: int64<tick>) : SearchI
     let w = weightsFor gameId b.MaxSnakes
     if sessions.Count > 64 then sweep ()
 
-    let s =
-        sessions.GetOrAdd(
-            gameId,
-            fun _ ->
-                { Searchers = ConcurrentDictionary()
-                  Lock = Lock()
-                  LastUsed = 0L }
-        )
+    let s = sessions.GetOrAdd(gameId, fun _ -> { Searchers = ConcurrentDictionary(); Lock = Lock(); LastUsed = 0L })
 
     Volatile.Write(&s.LastUsed, DateTime.UtcNow.Ticks)
     let geo = b.Geometry

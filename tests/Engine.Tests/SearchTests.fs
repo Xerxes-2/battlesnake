@@ -34,7 +34,11 @@ let positions (seed: int) (count: int) =
     res.ToArray()
 
 let fixedDepth (ordering: bool) (depth: int) (b: Board) =
-    let cfg = { SearchConfig.make Weights.standard with Ordering = ordering; ExactDepthOnly = true }
+    let cfg =
+        { SearchConfig.make Weights.standard with
+            Ordering = ordering
+            ExactDepthOnly = true }
+
     Searcher(geo, 4, cfg).Search(b, 0, Limits.depth depth)
 
 [<Fact>]

@@ -59,6 +59,7 @@ type Geometry(width: int, height: int) =
 
     member _.ZHead(s: int, c: int) = zHead[(s &&& (zSnakes - 1)) * cells + c]
     member _.ZBody(s: int, c: int) = zBody[(s &&& (zSnakes - 1)) * cells + c]
+
     /// Health and length together (they always change together in Step)
     member _.ZStats(s: int, hp: int, len: int) =
         let s = s &&& (zSnakes - 1)
@@ -241,6 +242,7 @@ type Board(geo: Geometry, maxSnakes: int) =
                 let first = min length[s] (ringSize - start)
                 Array.Copy(src, b + start, ring, b + start, first)
                 if first < length[s] then Array.Copy(src, b, ring, b, length[s] - first)
+
         Array.Copy(o.FoodArr, food, cells)
         Array.Copy(o.HazardArr, hazard, cells)
         Array.Copy(o.OccArr, occ, cells)
@@ -325,8 +327,7 @@ type Board(geo: Geometry, maxSnakes: int) =
 
         // 4a. Eliminate out-of-bounds and starved snakes first; they are no longer obstacles for collision checks
         for s in 0 .. numSnakes - 1 do
-            if alive[s] && (newHead[s] < 0 || health[s] <= 0) then
-                this.Kill s
+            if alive[s] && (newHead[s] < 0 || health[s] <= 0) then this.Kill s
 
         // 4b. Collisions: decide them all against the same state first, then apply together
         for s in 0 .. numSnakes - 1 do
@@ -342,8 +343,7 @@ type Board(geo: Geometry, maxSnakes: int) =
                     elim[s] <- true
                 elif heads > 1 then
                     for t in 0 .. numSnakes - 1 do
-                        if t <> s && alive[t] && newHead[t] = h && length[s] <= length[t] then
-                            elim[s] <- true
+                        if t <> s && alive[t] && newHead[t] = h && length[s] <= length[t] then elim[s] <- true
 
         for s in 0 .. numSnakes - 1 do
             if elim[s] && alive[s] then this.Kill s

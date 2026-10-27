@@ -11,11 +11,13 @@ open Snake.Engine
 /// The evaluation's raw features for one snake in one frame; the weights only re-weigh these.
 [<Struct>]
 type Sample =
-    { F: Features
-      /// How the snake finished: duel 1/0.5/0; standard the share of the other snakes it outlived (ties half)
-      Label: float32
-      /// Validation split, by game
-      Valid: bool }
+    {
+        F: Features
+        /// How the snake finished: duel 1/0.5/0; standard the share of the other snakes it outlived (ties half)
+        Label: float32
+        /// Validation split, by game
+        Valid: bool
+    }
 
 let private score (w: Weights) (s: Sample) = Eval.combine w s.F
 
@@ -26,9 +28,13 @@ let private gameSamples (players: int) (path: string) : Sample[] =
     let r = doc.RootElement
     let mutable p = Unchecked.defaultof<JsonElement>
 
-    if not (r.TryGetProperty("n", &p)) || p.GetInt32() <> players
-       || r.GetProperty("w").GetInt32() <> 11 || r.GetProperty("h").GetInt32() <> 11
-       || r.GetProperty("ruleset").GetString() <> "standard" then
+    if
+        not (r.TryGetProperty("n", &p))
+        || p.GetInt32() <> players
+        || r.GetProperty("w").GetInt32() <> 11
+        || r.GetProperty("h").GetInt32() <> 11
+        || r.GetProperty("ruleset").GetString() <> "standard"
+    then
         [||]
     else
         let geo = Geometry(11, 11)
@@ -49,10 +55,18 @@ let private gameSamples (players: int) (path: string) : Sample[] =
 
                 for s in snakes.EnumerateArray() do
                     let body = s.GetProperty("body")
-                    b.AddSnake(s.GetProperty("hp").GetInt32(), [| for i in 0..2 .. body.GetArrayLength() - 1 -> xy body i |]) |> ignore
-                    deaths.Add(match s.TryGetProperty "dt" with
-                               | true, d -> d.GetInt32()
-                               | _ -> Int32.MaxValue)
+
+                    b.AddSnake(
+                        s.GetProperty("hp").GetInt32(),
+                        [| for i in 0..2 .. body.GetArrayLength() - 1 -> xy body i |]
+                    )
+                    |> ignore
+
+                    deaths.Add(
+                        match s.TryGetProperty "dt" with
+                        | true, d -> d.GetInt32()
+                        | _ -> Int32.MaxValue
+                    )
 
                 let food = f.GetProperty("food")
 
@@ -66,11 +80,13 @@ let private gameSamples (players: int) (path: string) : Sample[] =
                 for me in 0 .. alive - 1 do
                     let outlived =
                         float deadBefore
-                        + (Seq.sum <| seq {
-                            for s in 0 .. alive - 1 do
-                                if s <> me then
-                                    if deaths[s] < deaths[me] then 1.0
-                                    elif deaths[s] = deaths[me] then 0.5 })
+                        + (Seq.sum
+                           <| seq {
+                               for s in 0 .. alive - 1 do
+                                   if s <> me then
+                                       if deaths[s] < deaths[me] then 1.0
+                                       elif deaths[s] = deaths[me] then 0.5
+                           })
 
                     out.Add
                         { F = Eval.features an b me
@@ -96,21 +112,25 @@ let private error (samples: Sample[]) (valid: bool) (w: Weights) (k: float) (bia
     let sums = Array.zeroCreate<float> chunks
     let counts = Array.zeroCreate<int> chunks
 
-    Parallel.For(0, chunks, fun c ->
-        let mutable e = 0.0
-        let mutable n = 0
+    Parallel.For(
+        0,
+        chunks,
+        fun c ->
+            let mutable e = 0.0
+            let mutable n = 0
 
-        for i in c .. chunks .. samples.Length - 1 do
-            let s = samples[i]
+            for i in c..chunks .. samples.Length - 1 do
+                let s = samples[i]
 
-            if s.Valid = valid then
-                let p = 1.0 / (1.0 + exp (-(score w s + bias) / k))
-                let d = float s.Label - p
-                e <- e + d * d
-                n <- n + 1
+                if s.Valid = valid then
+                    let p = 1.0 / (1.0 + exp (-(score w s + bias) / k))
+                    let d = float s.Label - p
+                    e <- e + d * d
+                    n <- n + 1
 
-        sums[c] <- e
-        counts[c] <- n)
+            sums[c] <- e
+            counts[c] <- n
+    )
     |> ignore
 
     Array.sum sums / float (Array.sum counts)
@@ -142,18 +162,32 @@ let run (argv: string[]) =
     let dir = argv[1]
     let mode = argv[2]
     let players = if mode = "duel" then 2 else 4
-    let start = if argv.Length > 3 then Weights.parse argv[3] elif mode = "duel" then Weights.duel else Weights.standard
+
+    let start =
+        if argv.Length > 3 then Weights.parse argv[3]
+        elif mode = "duel" then Weights.duel
+        else Weights.standard
+
     let samples = load dir players
     let k, bias0 = fitKBias samples start
+
     let show (w: Weights) =
         String.Join(",", Array.map2 (fun (n: string) (v: float) -> $"{n}={v:G4}") Weights.names (Weights.toArray w))
 
     let mean = samples |> Array.averageBy (fun s -> float s.Label)
+
     let constErr valid =
         samples |> Array.filter (fun s -> s.Valid = valid) |> Array.averageBy (fun s -> (float s.Label - mean) ** 2.0)
 
-    printfn "K = %.1f bias %.1f  train %.6f  valid %.6f  (always predicting the mean %.3f: train %.6f valid %.6f)" k bias0
-        (error samples false start k bias0) (error samples true start k bias0) mean (constErr false) (constErr true)
+    printfn
+        "K = %.1f bias %.1f  train %.6f  valid %.6f  (always predicting the mean %.3f: train %.6f valid %.6f)"
+        k
+        bias0
+        (error samples false start k bias0)
+        (error samples true start k bias0)
+        mean
+        (constErr false)
+        (constErr true)
 
     // Texel local search: try each weight up and down by a relative step, keep improvements, shrink the step when
     // nothing helps. Relative steps because the weights differ by orders of magnitude.
@@ -200,18 +234,45 @@ let run (argv: string[]) =
 // add predictive power on top of the current evaluation (tune/texel/screen.py).
 
 let private columns =
-    [| "valid"; "players"; "place"; "die10"; "die5"; "turn"; "me"; "area"; "oppArea"; "len"; "oppLen"; "others"; "hp"
-       "nf"; "eval"; "deg"; "solo"; "frontier"; "near3"; "headThreat"; "oppHeadDist"; "tailDist"; "wallDist"
-       "contested"; "minArea2"; "soloMinusArea" |]
+    [| "valid"
+       "players"
+       "place"
+       "die10"
+       "die5"
+       "turn"
+       "me"
+       "area"
+       "oppArea"
+       "len"
+       "oppLen"
+       "others"
+       "hp"
+       "nf"
+       "eval"
+       "deg"
+       "solo"
+       "frontier"
+       "near3"
+       "headThreat"
+       "oppHeadDist"
+       "tailDist"
+       "wallDist"
+       "contested"
+       "minArea2"
+       "soloMinusArea" |]
 
 let private dumpGame (players: int) (path: string) : float32[][] =
     use doc = JsonDocument.Parse(File.ReadAllText path)
     let r = doc.RootElement
     let mutable p = Unchecked.defaultof<JsonElement>
 
-    if not (r.TryGetProperty("n", &p)) || p.GetInt32() <> players
-       || r.GetProperty("w").GetInt32() <> 11 || r.GetProperty("h").GetInt32() <> 11
-       || r.GetProperty("ruleset").GetString() <> "standard" then
+    if
+        not (r.TryGetProperty("n", &p))
+        || p.GetInt32() <> players
+        || r.GetProperty("w").GetInt32() <> 11
+        || r.GetProperty("h").GetInt32() <> 11
+        || r.GetProperty("ruleset").GetString() <> "standard"
+    then
         [||]
     else
         let geo = Geometry(11, 11)
@@ -237,10 +298,19 @@ let private dumpGame (players: int) (path: string) : float32[][] =
 
                 for s in snakes.EnumerateArray() do
                     let body = s.GetProperty("body")
-                    b.AddSnake(s.GetProperty("hp").GetInt32(), [| for i in 0..2 .. body.GetArrayLength() - 1 -> xy body i |]) |> ignore
-                    deaths.Add(match s.TryGetProperty "dt" with
-                               | true, d -> d.GetInt32()
-                               | _ -> Int32.MaxValue)
+
+                    b.AddSnake(
+                        s.GetProperty("hp").GetInt32(),
+                        [| for i in 0..2 .. body.GetArrayLength() - 1 -> xy body i |]
+                    )
+                    |> ignore
+
+                    deaths.Add(
+                        match s.TryGetProperty "dt" with
+                        | true, d -> d.GetInt32()
+                        | _ -> Int32.MaxValue
+                    )
+
                     mine.Add(s.GetProperty("a").GetString() = "Xerxes-2")
 
                 let food = f.GetProperty("food")
@@ -283,6 +353,7 @@ let private dumpGame (players: int) (path: string) : float32[][] =
                             maxOppLen <- max maxOppLen (b.Length s)
                             let oh = b.Head s
                             oppHead <- min oppHead (abs (geo.X oh - geo.X h) + abs (geo.Y oh - geo.Y h))
+
                             if deaths[s] < deaths[me] then outlived <- outlived + 1.0
                             elif deaths[s] = deaths[me] then outlived <- outlived + 0.5
 
@@ -345,8 +416,10 @@ let private dumpGame (players: int) (path: string) : float32[][] =
                     let die = deaths[me]
                     let nf = an.NearestFood me
                     let x, y = geo.X h, geo.Y h
+
                     let ev =
-                        Eval.combine w
+                        Eval.combine
+                            w
                             { MyArea = an.Area me
                               MaxOppArea = maxOppArea
                               MyLen = myLen
@@ -356,13 +429,32 @@ let private dumpGame (players: int) (path: string) : float32[][] =
                               NearestFood = nf }
 
                     out.Add
-                        [| valid; float32 players; float32 (outlived / float (players - 1))
-                           (if die - turn <= 10 then 1f else 0f); (if die - turn <= 5 then 1f else 0f); float32 turn
-                           (if mine[me] then 1f else 0f); float32 (an.Area me); float32 maxOppArea; float32 myLen
-                           float32 maxOppLen; float32 (alive - 1); float32 (b.Health me); float32 (min nf 99); float32 ev
-                           float32 deg; float32 (qt - 1); float32 frontier; float32 near3; float32 threat; float32 oppHead
-                           float32 tailDist; float32 (min (min x (10 - x)) (min y (10 - y))); float32 contested
-                           float32 (if an.Area me = minArea then 1 else 0); float32 (qt - 1 - an.Area me) |]
+                        [| valid
+                           float32 players
+                           float32 (outlived / float (players - 1))
+                           (if die - turn <= 10 then 1f else 0f)
+                           (if die - turn <= 5 then 1f else 0f)
+                           float32 turn
+                           (if mine[me] then 1f else 0f)
+                           float32 (an.Area me)
+                           float32 maxOppArea
+                           float32 myLen
+                           float32 maxOppLen
+                           float32 (alive - 1)
+                           float32 (b.Health me)
+                           float32 (min nf 99)
+                           float32 ev
+                           float32 deg
+                           float32 (qt - 1)
+                           float32 frontier
+                           float32 near3
+                           float32 threat
+                           float32 oppHead
+                           float32 tailDist
+                           float32 (min (min x (10 - x)) (min y (10 - y)))
+                           float32 contested
+                           float32 (if an.Area me = minArea then 1 else 0)
+                           float32 (qt - 1 - an.Area me) |]
 
         out.ToArray()
 

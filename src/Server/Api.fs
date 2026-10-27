@@ -21,15 +21,9 @@ type SnakeDto =
       Shout: string
       Squad: string }
 
-type RulesetSettings =
-    { FoodSpawnChance: int
-      MinimumFood: int
-      HazardDamagePerTurn: int }
+type RulesetSettings = { FoodSpawnChance: int; MinimumFood: int; HazardDamagePerTurn: int }
 
-type Ruleset =
-    { Name: string
-      Version: string
-      Settings: RulesetSettings | null }
+type Ruleset = { Name: string; Version: string; Settings: RulesetSettings | null }
 
 type Game =
     { Id: string
@@ -45,11 +39,7 @@ type BoardDto =
       Hazards: Coord[] | null
       Snakes: SnakeDto[] | null }
 
-type GameState =
-    { Game: Game
-      Turn: int
-      Board: BoardDto
-      You: SnakeDto }
+type GameState = { Game: Game; Turn: int; Board: BoardDto; You: SnakeDto }
 
 /// "0.4.0+87ebf06": Version from Directory.Build.props plus the commit. Nix passes the flake's short rev as
 /// SourceRevisionId; local builds get the full git sha from the SDK, shortened here to match.
@@ -74,8 +64,7 @@ let info =
 
 let private geometries = ConcurrentDictionary<struct (int * int), Geometry>()
 
-let geometry w h =
-    geometries.GetOrAdd(struct (w, h), fun struct (w, h) -> Geometry(w, h))
+let geometry w h = geometries.GetOrAdd(struct (w, h), fun struct (w, h) -> Geometry(w, h))
 
 /// An array field the engine left out counts as empty.
 let orEmpty (a: 'T[] | null) =

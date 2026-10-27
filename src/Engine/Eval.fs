@@ -47,8 +47,7 @@ type Territory(geo: Geometry, maxSnakes: int) =
     member _.Dist(c: int) = dist[c]
 
     /// Fills Area and NearestFood. Uses the bitboard version when the board fits in 128 cells.
-    member this.Voronoi(b: Board) =
-        if bitsOk then this.VoronoiBits b else this.VoronoiScalar b
+    member this.Voronoi(b: Board) = if bitsOk then this.VoronoiBits b else this.VoronoiScalar b
 
     /// Same result as VoronoiScalar for Area/NearestFood, one BFS level per iteration over whole bitboards.
     /// A board is two uint64 halves (cells 0-63 in lo, 64-127 in hi); UInt128 was only ~1.3x faster than the
@@ -118,7 +117,10 @@ type Territory(geo: Geometry, maxSnakes: int) =
                             let c = b.Body(s, k)
 
                             if c <> b.Body(s, k - 1) then
-                                if c < 64 then blLo <- blLo &&& ~~~(1UL <<< c) else blHi <- blHi &&& ~~~(1UL <<< (c - 64))
+                                if c < 64 then
+                                    blLo <- blLo &&& ~~~(1UL <<< c)
+                                else
+                                    blHi <- blHi &&& ~~~(1UL <<< (c - 64))
 
             let freeLo = fullLo &&& ~~~(rLo ||| blLo)
             let freeHi = fullHi &&& ~~~(rHi ||| blHi)
@@ -233,22 +235,23 @@ type Territory(geo: Geometry, maxSnakes: int) =
             if o >= 0 && dist[c] > 0 then
                 area[o] <- area[o] + 1
 
-                if b.IsFood c && dist[c] < nearestFood[o] then
-                    nearestFood[o] <- dist[c]
+                if b.IsFood c && dist[c] < nearestFood[o] then nearestFood[o] <- dist[c]
 
 /// The raw evaluation features of one snake. Kept separate from the weights so the Texel tuner can compute them once
 /// and re-weigh them many times.
 [<Struct>]
 type Features =
-    { MyArea: int
-      MaxOppArea: int
-      MyLen: int
-      MaxOppLen: int
-      /// Living opponents
-      Others: int
-      Hp: int
-      /// Distance to the nearest food in my territory, Int32.MaxValue when there is none
-      NearestFood: int }
+    {
+        MyArea: int
+        MaxOppArea: int
+        MyLen: int
+        MaxOppLen: int
+        /// Living opponents
+        Others: int
+        Hp: int
+        /// Distance to the nearest food in my territory, Int32.MaxValue when there is none
+        NearestFood: int
+    }
 
 module Eval =
     /// Score for a dead snake / the only survivor.
@@ -267,8 +270,7 @@ module Eval =
         // Not enough territory to hold our own body: we will most likely get trapped
         let need = w.TrapRatio * float f.MyLen
 
-        if float f.MyArea < need then
-            score <- score - w.Trapped * (need - float f.MyArea)
+        if float f.MyArea < need then score <- score - w.Trapped * (need - float f.MyArea)
 
         let nf = f.NearestFood
         let hp = f.Hp

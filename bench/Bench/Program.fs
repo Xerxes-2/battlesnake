@@ -65,23 +65,27 @@ let samplePositions count =
             randomMoves b moves
             b.Step moves
 
-            if b.Turn >= 20 && b.Turn % 10 = 0 && b.AliveCount >= 2 && res.Count < count then
-                res.Add(b.Clone())
+            if b.Turn >= 20 && b.Turn % 10 = 0 && b.AliveCount >= 2 && res.Count < count then res.Add(b.Clone())
 
     res.ToArray()
 
 let measure name (seconds: float) (work: unit -> int) =
     // Warm up so tiered compilation finishes promoting the hot paths
     let w = Stopwatch.StartNew()
-    while w.Elapsed.TotalSeconds < 1.5 do work () |> ignore
+
+    while w.Elapsed.TotalSeconds < 1.5 do
+        work () |> ignore
 
     let rounds = 5
+
     let rates =
         [| for _ in 1..rounds do
                let sw = Stopwatch.StartNew()
                let mutable ops = 0L
+
                while sw.Elapsed.TotalSeconds < seconds do
                    ops <- ops + int64 (work ())
+
                float ops / sw.Elapsed.TotalSeconds |]
 
     Array.sortInPlace rates
@@ -105,7 +109,12 @@ let searchBench (positions: Board[]) (ms: float) (rounds: int) =
             depth <- depth + int64 r.Depth
             n <- n + 1
 
-    printfn "%-28s %12.0f nodes/s   avg depth %.2f over %d searches" $"search {ms}ms" (float nodes / sw.Elapsed.TotalSeconds) (float depth / float n) n
+    printfn
+        "%-28s %12.0f nodes/s   avg depth %.2f over %d searches"
+        $"search {ms}ms"
+        (float nodes / sw.Elapsed.TotalSeconds)
+        (float depth / float n)
+        n
 
 /// Mid-game positions with n snakes from semi-random play.
 let mixedPositions (n: int) (count: int) =
@@ -150,12 +159,25 @@ let orderBench () =
                     (Searcher(geo, n, cfg).Search(b, 0, Limits.depth d)).Nodes)
 
             let a, h, t = total false false, total true false, total true true
-            printfn "%-9s depth %d: plain %11d  hints %11d (%.2fx)  +scores %11d (%.2fx)" label d a h (float a / float h) t (float a / float t)
+
+            printfn
+                "%-9s depth %d: plain %11d  hints %11d (%.2fx)  +scores %11d (%.2fx)"
+                label
+                d
+                a
+                h
+                (float a / float h)
+                t
+                (float a / float t)
 
 /// Lazy SMP at a fixed time per position: nodes/s and average completed depth for 1..threads threads.
 let smpBench (positions: Board[]) (ms: float) (threads: int) =
     for t in 1..threads do
-        let div = match Environment.GetEnvironmentVariable "SMP_DIV" with | null -> 2 | v -> int v
+        let div =
+            match Environment.GetEnvironmentVariable "SMP_DIV" with
+            | null -> 2
+            | v -> int v
+
         let ps = ParallelSearcher(geo, 4, { SearchConfig.make Weights.standard with Diversity = div }, t)
         let mutable nodes = 0L
         let mutable depth = 0L
@@ -168,7 +190,12 @@ let smpBench (positions: Board[]) (ms: float) (threads: int) =
             nodes <- nodes + r.Nodes
             depth <- depth + int64 r.Depth
 
-        printfn "smp %d thread(s) %4.0fms   %10.0f nodes/s   avg depth %.2f" t ms (float nodes / sw.Elapsed.TotalSeconds) (float depth / float positions.Length)
+        printfn
+            "smp %d thread(s) %4.0fms   %10.0f nodes/s   avg depth %.2f"
+            t
+            ms
+            (float nodes / sw.Elapsed.TotalSeconds)
+            (float depth / float positions.Length)
 
 /// Behaviour fingerprint for refactors: fixed-node searches in several configurations, evaluations and the
 /// baseline policy on fixed positions. Any change in the output means the engine's behaviour changed.
@@ -178,7 +205,8 @@ let fingerprint () =
     for n in [ 2; 4 ] do
         let ps = mixedPositions n 24
 
-        for wname, w in [ "std", Weights.standard; "stdPrev", Weights.standardPrev; "duel", Weights.duel; "def", Weights.defaults ] do
+        for wname, w in
+            [ "std", Weights.standard; "stdPrev", Weights.standardPrev; "duel", Weights.duel; "def", Weights.defaults ] do
             let t = Territory(geo, n)
 
             for i, b in Array.indexed ps do
@@ -201,7 +229,20 @@ let fingerprint () =
                 for i, b in Array.indexed ps do
                     let sr = if cfg = "persist" then persistent else Searcher(geo, n, config)
                     let r = sr.Search(b, 0, limits)
-                    lines.Add(sprintf "search %d %s %s %d %O %d %.6f %d %b" n wname cfg i r.Move r.Depth r.Score r.Nodes r.Relaxed)
+
+                    lines.Add(
+                        sprintf
+                            "search %d %s %s %d %O %d %.6f %d %b"
+                            n
+                            wname
+                            cfg
+                            i
+                            r.Move
+                            r.Depth
+                            r.Score
+                            r.Nodes
+                            r.Relaxed
+                    )
 
                 let ps1 = ParallelSearcher(geo, n, c, 2)
 
@@ -224,14 +265,30 @@ let main argv =
     if argv |> Array.contains "fingerprint" then
         fingerprint ()
         exit 0
+
     if argv |> Array.contains "smp" then
         let positions = samplePositions 32
         smpBench positions 50.0 2 // warm-up
-        let ms = argv |> Array.tryPick (fun a -> match Double.TryParse a with | true, v -> Some v | _ -> None) |> Option.defaultValue 250.0
-        let tmax = (match Environment.GetEnvironmentVariable "SMP_T" with | null -> 4 | v -> int v)
+
+        let ms =
+            argv
+            |> Array.tryPick (fun a ->
+                match Double.TryParse a with
+                | true, v -> Some v
+                | _ -> None)
+            |> Option.defaultValue 250.0
+
+        let tmax =
+            (match Environment.GetEnvironmentVariable "SMP_T" with
+             | null -> 4
+             | v -> int v)
+
         if tmax = 1 then
-            for m in [ ms; ms * 2.0; ms * 4.0 ] do smpBench positions m 1
-        else smpBench positions ms tmax
+            for m in [ ms; ms * 2.0; ms * 4.0 ] do
+                smpBench positions m 1
+        else
+            smpBench positions ms tmax
+
         exit 0
 
     if argv |> Array.contains "order" then
@@ -244,7 +301,12 @@ let main argv =
         searchBench positions 100.0 (if argv |> Array.contains "long" then 10 else 2)
         exit 0
 
-    printfn "%s | %s | %s | cores=%d" RuntimeInformation.FrameworkDescription (string RuntimeInformation.OSArchitecture) RuntimeInformation.RuntimeIdentifier Environment.ProcessorCount
+    printfn
+        "%s | %s | %s | cores=%d"
+        RuntimeInformation.FrameworkDescription
+        (string RuntimeInformation.OSArchitecture)
+        RuntimeInformation.RuntimeIdentifier
+        Environment.ProcessorCount
 
     let init = start ()
     let b = Board(geo, 4)

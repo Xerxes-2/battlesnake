@@ -18,15 +18,19 @@ let board (snakes: (int * (int * int) list) list) (food: (int * int) list) =
 
     b
 
-let body (b: Board) s =
-    [ for k in 0 .. b.Length s - 1 -> let cell = b.Body(s, k) in geo.X cell, geo.Y cell ]
+let body (b: Board) s = [ for k in 0 .. b.Length s - 1 -> let cell = b.Body(s, k) in geo.X cell, geo.Y cell ]
 
 let step (b: Board) (moves: Dir list) = b.Step(Array.ofList moves)
 
 let totalOcc (b: Board) = Seq.sum (seq { for i in 0 .. geo.Cells - 1 -> b.Occupancy i })
 
 let aliveLen (b: Board) =
-    Seq.sum (seq { for s in 0 .. b.NumSnakes - 1 do if b.Alive s then b.Length s })
+    Seq.sum (
+        seq {
+            for s in 0 .. b.NumSnakes - 1 do
+                if b.Alive s then b.Length s
+        }
+    )
 
 [<Fact>]
 let ``move shifts body and costs one health`` () =
@@ -172,9 +176,13 @@ let ``incremental hash matches a from-scratch hash`` () =
 
         if g % 3 = 0 then
             b.HazardDamage <- 14
-            for _ in 1..20 do b.AddHazard(rng.Next geo.Cells)
 
-        for _ in 1..10 do b.SetFood(rng.Next geo.Cells, true)
+            for _ in 1..20 do
+                b.AddHazard(rng.Next geo.Cells)
+
+        for _ in 1..10 do
+            b.SetFood(rng.Next geo.Cells, true)
+
         Assert.Equal(b.ComputeHash(), b.Hash)
         let moves = Array.zeroCreate<Dir> 4
 
@@ -192,7 +200,17 @@ let ``incremental hash matches a from-scratch hash`` () =
             if rng.Next 100 < 5 then b.SetFood(rng.Next geo.Cells, false)
             Assert.Equal(b.ComputeHash(), b.Hash)
             Assert.Equal(b.Hash, b.Clone().Hash)
-            let bits f = Seq.fold (fun (lo, hi) c -> if f c then (if c < 64 then lo ||| (1UL <<< c), hi else lo, hi ||| (1UL <<< (c - 64))) else lo, hi) (0UL, 0UL) (seq { 0 .. geo.Cells - 1 })
+
+            let bits f =
+                Seq.fold
+                    (fun (lo, hi) c ->
+                        if f c then
+                            (if c < 64 then lo ||| (1UL <<< c), hi else lo, hi ||| (1UL <<< (c - 64)))
+                        else
+                            lo, hi)
+                    (0UL, 0UL)
+                    (seq { 0 .. geo.Cells - 1 })
+
             Assert.Equal((b.OccLo, b.OccHi), bits (fun c -> b.Occupancy c > 0))
             Assert.Equal((b.FoodLo, b.FoodHi), bits b.IsFood)
             steps <- steps + 1
