@@ -108,6 +108,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     let advMoves = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<Dir> (maxSnakes * 4))
     let advCount = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<int> maxSnakes)
     let odo = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<int> maxSnakes)
+    let refute = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<int> maxSnakes)
     let tmp = Array.zeroCreate<Dir> 4
     let rootScore = Array.zeroCreate<float> 4
 
@@ -348,6 +349,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                         simplified <- true
 
             let od = odo[ply]
+            let rf = refute[ply]
             let child = boards[ply + 1]
             let mutable best = Double.NegativeInfinity
             let mutable bestI = 0
@@ -357,57 +359,81 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                 mv[me] <- mine[i]
                 let a = max alpha best
                 let mutable worst = Double.PositiveInfinity
-                Array.Clear(od, 0, na)
-                let mutable fin = false
+                // PVS: after the first move, only ask "does this beat a?" with a null window; re-search if it does
+                let mutable scout = depth >= 3 && i > 0 && a > Double.NegativeInfinity && a < beta
+                let mutable pass = true
 
-                while not fin do
-                    for j in 0 .. na - 1 do
-                        mv[advs[j]] <- am[j * 4 + od[j]]
+                while pass do
+                    let cap = if scout then Math.BitIncrement a else beta
+                    worst <- Double.PositiveInfinity
+                    Array.Clear(od, 0, na)
+                    let mutable fin = false
 
-                    child.CopyFrom b
-                    child.Step mv
-                    nodes <- nodes + 1L
-                    this.CheckTime()
+                    while not fin do
+                        for j in 0 .. na - 1 do
+                            mv[advs[j]] <- am[j * 4 + od[j]]
 
-                    let v =
-                        if not (child.Alive me) then
-                            // Dying later is better: gives the opponents more chances to blunder
-                            -win + float ply
-                        elif child.NumSnakes > 1 && child.AliveCount = 1 then
-                            // Only proven if every opponent that died this step was searched. A Default snake dying is
-                            // likely, not forced: score it high but below win / 2 so it neither ends the iterative
-                            // deepening nor counts as a proof in the TT.
-                            if simplified && soundProofs then likelyWin - float ply else win - float ply
-                        elif depth = 1 then
-                            Eval.evaluate weights territory child me
-                        else
-                            this.Max(ply + 1, depth - 1, a, min beta worst, 0)
+                        child.CopyFrom b
+                        child.Step mv
+                        nodes <- nodes + 1L
+                        this.CheckTime()
 
-                    if v < worst then worst <- v
-
-                    if worst <= a || aborted then
-                        // This move cannot beat what we already have; credit the opponents' refutation
-                        if ordering && not aborted && depth > 1 then
-                            for j in 0 .. na - 1 do
-                                let s = advs[j]
-                                let i4 = b.Head s * 4 + int mv[s]
-                                histOpp[i4] <- histOpp[i4] + depth * depth
-
-                        fin <- true
-                    else
-                        let mutable j = 0
-                        let mutable carry = true
-
-                        while carry && j < na do
-                            od[j] <- od[j] + 1
-
-                            if od[j] = ac[j] then
-                                od[j] <- 0
-                                j <- j + 1
+                        let v =
+                            if not (child.Alive me) then
+                                // Dying later is better: gives the opponents more chances to blunder
+                                -win + float ply
+                            elif child.NumSnakes > 1 && child.AliveCount = 1 then
+                                // Only proven if every opponent that died this step was searched. A Default snake dying is
+                                // likely, not forced: score it high but below win / 2 so it neither ends the iterative
+                                // deepening nor counts as a proof in the TT.
+                                if simplified && soundProofs then likelyWin - float ply else win - float ply
+                            elif depth = 1 then
+                                Eval.evaluate weights territory child me
                             else
-                                carry <- false
+                                this.Max(ply + 1, depth - 1, a, min cap worst, 0)
 
-                        if carry then fin <- true
+                        if v < worst then
+                            worst <- v
+                            Array.Copy(od, rf, na)
+
+                        if worst <= a || aborted then
+                            // This move cannot beat what we already have; credit the opponents' refutation
+                            if ordering && not aborted && depth > 1 then
+                                for j in 0 .. na - 1 do
+                                    let s = advs[j]
+                                    let i4 = b.Head s * 4 + int mv[s]
+                                    histOpp[i4] <- histOpp[i4] + depth * depth
+
+                            fin <- true
+                        else
+                            let mutable j = 0
+                            let mutable carry = true
+
+                            while carry && j < na do
+                                od[j] <- od[j] + 1
+
+                                if od[j] = ac[j] then
+                                    od[j] <- 0
+                                    j <- j + 1
+                                else
+                                    carry <- false
+
+                            if carry then fin <- true
+
+                    if scout && worst > a && not aborted then scout <- false else pass <- false
+
+                // The reply that hurt this move most is tried first against the next one (killer-style)
+                if ordering && not aborted then
+                    for j in 0 .. na - 1 do
+                        let k = rf[j]
+
+                        if k > 0 then
+                            let m = am[j * 4 + k]
+
+                            for t in k .. -1 .. 1 do
+                                am[j * 4 + t] <- am[j * 4 + t - 1]
+
+                            am[j * 4] <- m
 
                 if not aborted then
                     if ply = 0 then rootScore[i] <- worst
