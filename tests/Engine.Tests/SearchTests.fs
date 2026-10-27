@@ -34,11 +34,8 @@ let positions (seed: int) (count: int) =
     res.ToArray()
 
 let fixedDepth (ordering: bool) (depth: int) (b: Board) =
-    let s = Searcher(geo, 4, Weights.Standard)
-    s.Ordering <- ordering
-    s.ExactDepthOnly <- true
-    s.MaxDepth <- depth
-    s.SearchFor(b, 0, 600_000.0)
+    let cfg = { SearchConfig.make Weights.standard with Ordering = ordering; ExactDepthOnly = true }
+    Searcher(geo, 4, cfg).Search(b, 0, Limits.depth depth)
 
 [<Fact>]
 let ``move ordering does not change the fixed-depth result`` () =
@@ -61,10 +58,9 @@ let ``reusing a persistent table keeps the result at least as deep`` () =
     // Search once, then again on the same searcher: the second run must reach at least the same depth on far
     // fewer nodes, and agree on the score at the depth both completed (deeper entries may only refine it).
     for b in positions 5 15 do
-        let s = Searcher(geo, 4, Weights.Standard)
-        s.MaxDepth <- 5
-        let first = s.SearchFor(b, 0, 600_000.0)
-        let second = s.SearchFor(b, 0, 600_000.0)
+        let s = Searcher(geo, 4, SearchConfig.make Weights.standard)
+        let first = s.Search(b, 0, Limits.depth 5)
+        let second = s.Search(b, 0, Limits.depth 5)
         Assert.Equal(first.Depth, second.Depth)
         Assert.Equal(first.Score, second.Score)
         Assert.True(second.Nodes * 3L <= first.Nodes + 50L, $"second {second.Nodes} vs first {first.Nodes}")
@@ -73,13 +69,12 @@ let ``reusing a persistent table keeps the result at least as deep`` () =
 /// even started) does not leave helpers running until the deadline.
 [<Fact>]
 let ``parallel searcher stops on time and plays legal moves`` () =
-    let ps = ParallelSearcher(geo, 4, Weights.Standard, 4)
+    let ps = ParallelSearcher(geo, 4, SearchConfig.make Weights.standard, 4)
     let ms (t: int64) = float (System.Diagnostics.Stopwatch.GetTimestamp() - t) * 1000.0 / float System.Diagnostics.Stopwatch.Frequency
-    let after (x: float) = System.Diagnostics.Stopwatch.GetTimestamp() + int64 (x * float System.Diagnostics.Stopwatch.Frequency / 1000.0)
 
     for b in positions 21 20 do
         let t0 = System.Diagnostics.Stopwatch.GetTimestamp()
-        let r = ps.Search(b, 0, after 30.0, 3)
+        let r = ps.Search(b, 0, Limits.forMs 30.0, 3)
         Assert.True(ms t0 < 80.0, $"took {ms t0} ms")
         Assert.True(geo.Neighbor(b.Head 0, r.Move) >= 0)
 
@@ -88,6 +83,6 @@ let ``parallel searcher stops on time and plays legal moves`` () =
     b.AddSnake(100, [| geo.Cell(0, 0); geo.Cell(1, 0); geo.Cell(2, 0) |]) |> ignore
     b.AddSnake(100, [| geo.Cell(9, 9); geo.Cell(9, 8); geo.Cell(9, 7) |]) |> ignore
     let t0 = System.Diagnostics.Stopwatch.GetTimestamp()
-    let r = ps.Search(b, 0, after 2000.0, 3)
+    let r = ps.Search(b, 0, Limits.forMs 2000.0, 3)
     Assert.Equal(Dir.Up, r.Move)
     Assert.True(ms t0 < 500.0, $"forced move took {ms t0} ms")

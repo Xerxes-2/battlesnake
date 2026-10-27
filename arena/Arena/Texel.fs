@@ -11,20 +11,13 @@ open Snake.Engine
 /// The evaluation's raw features for one snake in one frame; the weights only re-weigh these.
 [<Struct>]
 type Sample =
-    { MyArea: int
-      MaxOppArea: int
-      MyLen: int
-      MaxOppLen: int
-      Others: int
-      Hp: int
-      Nf: int
+    { F: Features
       /// How the snake finished: duel 1/0.5/0; standard the share of the other snakes it outlived (ties half)
       Label: float32
       /// Validation split, by game
       Valid: bool }
 
-let private score (w: Weights) (s: Sample) =
-    Analyzer.Combine(w, s.MyArea, s.MaxOppArea, s.MyLen, s.MaxOppLen, s.Others, s.Hp, s.Nf)
+let private score (w: Weights) (s: Sample) = Eval.combine w s.F
 
 /// Features of every alive snake in every frame of one saved game (tune/fetch_games.py format), for games with
 /// `players` snakes on 11x11 standard rules.
@@ -39,7 +32,7 @@ let private gameSamples (players: int) (path: string) : Sample[] =
         [||]
     else
         let geo = Geometry(11, 11)
-        let an = Analyzer(geo, players)
+        let an = Territory(geo, players)
         // Stable across runs (string.GetHashCode is randomized per process); ids are random hex
         let valid = Convert.ToInt32((Path.GetFileName path).Substring(0, 2), 16) % 5 = 0
         let out = ResizeArray()
@@ -71,25 +64,16 @@ let private gameSamples (players: int) (path: string) : Sample[] =
                 let deadBefore = players - alive
 
                 for me in 0 .. alive - 1 do
-                    let mutable maxOppArea = 0
-                    let mutable maxOppLen = 0
-                    let mutable outlived = float deadBefore
-
-                    for s in 0 .. alive - 1 do
-                        if s <> me then
-                            maxOppArea <- max maxOppArea (an.Area s)
-                            maxOppLen <- max maxOppLen (b.Length s)
-                            if deaths.[s] < deaths.[me] then outlived <- outlived + 1.0
-                            elif deaths.[s] = deaths.[me] then outlived <- outlived + 0.5
+                    let outlived =
+                        float deadBefore
+                        + (Seq.sum <| seq {
+                            for s in 0 .. alive - 1 do
+                                if s <> me then
+                                    if deaths.[s] < deaths.[me] then 1.0
+                                    elif deaths.[s] = deaths.[me] then 0.5 })
 
                     out.Add
-                        { MyArea = an.Area me
-                          MaxOppArea = maxOppArea
-                          MyLen = b.Length me
-                          MaxOppLen = maxOppLen
-                          Others = alive - 1
-                          Hp = b.Health me
-                          Nf = an.NearestFood me
+                        { F = Eval.features an b me
                           Label = float32 (outlived / float (players - 1))
                           Valid = valid }
 
@@ -158,11 +142,11 @@ let run (argv: string[]) =
     let dir = argv.[1]
     let mode = argv.[2]
     let players = if mode = "duel" then 2 else 4
-    let start = if argv.Length > 3 then Weights.Parse argv.[3] elif mode = "duel" then Weights.Duel else Weights.Standard
+    let start = if argv.Length > 3 then Weights.parse argv.[3] elif mode = "duel" then Weights.duel else Weights.standard
     let samples = load dir players
     let k, bias0 = fitKBias samples start
     let show (w: Weights) =
-        String.Join(",", Array.map2 (fun (n: string) (v: float) -> $"{n}={v:G4}") Weights.Names w.Values)
+        String.Join(",", Array.map2 (fun (n: string) (v: float) -> $"{n}={v:G4}") Weights.names (Weights.toArray w))
 
     let mean = samples |> Array.averageBy (fun s -> float s.Label)
     let constErr valid =
@@ -173,7 +157,7 @@ let run (argv: string[]) =
 
     // Texel local search: try each weight up and down by a relative step, keep improvements, shrink the step when
     // nothing helps. Relative steps because the weights differ by orders of magnitude.
-    let v = Array.copy start.Values
+    let v = Weights.toArray start
     let mutable bias = bias0
     let mutable best = error samples false start k bias
     let mutable step = 0.2
@@ -188,7 +172,7 @@ let run (argv: string[]) =
                 for dir in [ 1.0 + step; 1.0 / (1.0 + step) ] do
                     let old = v.[i]
                     v.[i] <- old * dir
-                    let e = error samples false (Weights(v)) k bias
+                    let e = error samples false (Weights.ofArray v) k bias
 
                     if e < best - 1e-9 then
                         best <- e
@@ -197,19 +181,19 @@ let run (argv: string[]) =
                         v.[i] <- old
 
             for d in [ step * k; -step * k ] do
-                let e = error samples false (Weights(v)) k (bias + d)
+                let e = error samples false (Weights.ofArray v) k (bias + d)
 
                 if e < best - 1e-9 then
                     best <- e
                     bias <- bias + d
                     improved <- true
 
-        printfn "step %.3f  train %.6f  valid %.6f" step best (error samples true (Weights(v)) k bias)
+        printfn "step %.3f  train %.6f  valid %.6f" step best (error samples true (Weights.ofArray v) k bias)
 
         step <- step / 2.0
 
     printfn "bias %.1f" bias
-    printfn "result: %s" (show (Weights(v)))
+    printfn "result: %s" (show (Weights.ofArray v))
 
 // ---------------------------------------------------------------------------------------------------------------
 // Feature screening: dump candidate features for every alive snake in every frame, to test in numpy which of them
@@ -231,8 +215,8 @@ let private dumpGame (players: int) (path: string) : float32[][] =
         [||]
     else
         let geo = Geometry(11, 11)
-        let w = if players = 2 then Weights.Duel else Weights.Standard
-        let an = Analyzer(geo, players, w)
+        let w = Weights.forSnakes players
+        let an = Territory(geo, players)
         let valid = if Convert.ToInt32((Path.GetFileName path).Substring(0, 2), 16) % 5 = 0 then 1f else 0f
         let cells = geo.Cells
         let vac = Array.zeroCreate<int> cells
@@ -361,7 +345,15 @@ let private dumpGame (players: int) (path: string) : float32[][] =
                     let die = deaths.[me]
                     let nf = an.NearestFood me
                     let x, y = geo.X h, geo.Y h
-                    let ev = Analyzer.Combine(w, an.Area me, maxOppArea, myLen, maxOppLen, alive - 1, b.Health me, nf)
+                    let ev =
+                        Eval.combine w
+                            { MyArea = an.Area me
+                              MaxOppArea = maxOppArea
+                              MyLen = myLen
+                              MaxOppLen = maxOppLen
+                              Others = alive - 1
+                              Hp = b.Health me
+                              NearestFood = nf }
 
                     out.Add
                         [| valid; float32 players; float32 (outlived / float (players - 1))

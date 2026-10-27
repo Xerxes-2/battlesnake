@@ -7,7 +7,8 @@
 
   <ItemGroup>
     <Compile Include="Board.fs" />
-    <Compile Include="Search.fs" />
+    <Compile Include="Weights.fs" />
+    <Compile Include="Eval.fs" />
     <Compile Include="Tree.fs" />
   </ItemGroup>
 

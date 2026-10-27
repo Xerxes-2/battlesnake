@@ -38,18 +38,16 @@ let load (name: string) =
 [<Fact>]
 let ``no fake proven win when the duel opponent is far away`` () =
     let geo, b = load "duel-fake-win-t479.json"
-    let sr = Searcher(geo, 4, Weights.Duel)
-    sr.NodeLimit <- 2_000_000L
-    let r = sr.SearchFor(b, 0, 60_000.0)
+    let r = Searcher(geo, 4, SearchConfig.make Weights.duel).Search(b, 0, Limits.nodes 2_000_000L)
     Assert.True(r.Score < 500_000.0, $"claimed a proven win: score {r.Score} at depth {r.Depth}")
 
 /// Ladder game 7a8e3ab9 (died turn 88): the paranoid search saw only losses, the relaxed re-search kept just the
 /// "nearest" opponent (alexander at distance 2, picked by tie order) and moved right into (9,5), where Nathan, also
 /// at distance 2 and longer, moved too. Every opponent that can reach our next cell must stay adversarial.
-[<Fact(Skip = "RelaxNear is off: the fix for this position cost far more on the ladder than it saved")>]
-let ``relaxed search keeps every opponent two steps away adversarial`` () =
+/// RelaxNear fixes it but is off by default: it cost far more on the ladder than it saved (see SearchConfig).
+[<Fact>]
+let ``relaxed search with RelaxNear keeps every opponent two steps away adversarial`` () =
     let geo, b = load "std-relaxed-tie-t87.json"
-    let sr = Searcher(geo, 4, Weights.Standard)
-    sr.NodeLimit <- 400_000L
-    let r = sr.SearchFor(b, 0, 60_000.0)
+    let cfg = { SearchConfig.make Weights.standard with RelaxNear = true }
+    let r = Searcher(geo, 4, cfg).Search(b, 0, Limits.nodes 400_000L)
     Assert.NotEqual(Dir.Right, r.Move)

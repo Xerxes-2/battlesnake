@@ -6,8 +6,9 @@
 ///   Arena tune  [--mode duel|standard] [--nodes N] [--iters N] [--batch B] [--from weights] [--par P]
 ///
 ///   bot:  base | search:<ms> | nodes:<n> | plain:<n> (no ordering) | hint:<n> (no score reuse)
-///         | ponder:<n>:<p> (p more nodes after each move)   optionally followed by @<weights>
-///   weights: "name=value,..." or a path to a file in that format (see Weights.Names)
+///         | legacy:<n> (pre-0.6.1 proofs) | relaxnear:<n> (0.7.1 re-search) | ponder:<n>:<p> (p more nodes
+///         after each move) | smp:<ms>:<threads>:<diversity>   optionally followed by @<weights>
+///   weights: "name=value,..." or a path to a file in that format (see Weights.names)
 module Snake.Arena.Program
 
 open System
@@ -30,88 +31,55 @@ let stats' (sw: Diagnostics.Stopwatch) =
         (float totalNodes / s / 1e6) (GC.GetTotalPauseDuration().TotalSeconds) (GC.CollectionCount 2)
         (float (GC.GetTotalAllocatedBytes false) / 1e9)
 
-let parseWeights (s: string) =
-    if File.Exists s then Weights.Parse(File.ReadAllText s) else Weights.Parse s
+let private readText (s: string) = if File.Exists s then File.ReadAllText s else s
+
+/// A weights spec (name=value pairs or a file) over the defaults.
+let parseWeights (s: string) = Weights.parse (readText s)
+
+/// A bot that searches with `config` within the limits `limits ()` gives for each move.
+let private searcher geo maxSnakes config (limits: unit -> Limits) : Bot =
+    let sr = Searcher(geo, maxSnakes, config)
+    fun b s -> count (sr.Search(b, s, limits ()))
 
 let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot =
+    let cfg = SearchConfig.make w
+    let nodes n = fun () -> Limits.nodes (int64 n)
+
     match spec.Split(':') with
-    | [| "base" |] ->
-        let p = Policy(geo, maxSnakes)
-        fun b s -> p.Decide(b, s)
-    | [| "search"; ms |] ->
-        let ms = float ms
-        let sr = Searcher(geo, maxSnakes, w)
-        fun b s -> count (sr.SearchFor(b, s, ms))
-    | [| "nodes"; n |] ->
-        let sr = Searcher(geo, maxSnakes, w)
-        sr.NodeLimit <- int64 n
-        // Generous deadline: the node limit is what stops the search
-        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
-    | [| "hint"; n |] ->
-        // move ordering hints only, no score reuse
-        let sr = Searcher(geo, maxSnakes, w)
-        sr.NodeLimit <- int64 n
-        sr.UseScores <- false
-        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
+    | [| "base" |] -> Policy.create geo maxSnakes
+    | [| "search"; ms |] -> searcher geo maxSnakes cfg (fun () -> Limits.forMs (float ms))
+    | [| "nodes"; n |] -> searcher geo maxSnakes cfg (nodes n)
+    // move ordering hints only, no score reuse
+    | [| "hint"; n |] -> searcher geo maxSnakes { cfg with UseScores = false } (nodes n)
+    // nodes:<n> with the pre-0.6.1 unsound proofs, for A/B
+    | [| "legacy"; n |] -> searcher geo maxSnakes { cfg with SoundProofs = false } (nodes n)
+    // nodes:<n> without move ordering, for A/B
+    | [| "plain"; n |] -> searcher geo maxSnakes { cfg with Ordering = false } (nodes n)
+    // nodes:<n> with 0.7.1's relaxed re-search that keeps opponents 2 steps away adversarial, for A/B
+    | [| "relaxnear"; n |] -> searcher geo maxSnakes { cfg with RelaxNear = true } (nodes n)
     | [| "ponder"; n; p |] ->
         // After answering, keep searching the same position for p more nodes (the server does this while the
         // response travels and the other snakes think); the table carries it into the next turn.
-        let sr = Searcher(geo, maxSnakes, w)
-        let n, p = int64 n, int64 p
+        let sr = Searcher(geo, maxSnakes, cfg)
 
         fun b s ->
-            sr.NodeLimit <- n
-            let m = count (sr.SearchFor(b, s, 10_000.0))
-            sr.NodeLimit <- p
-            count (sr.SearchFor(b, s, 10_000.0)) |> ignore
+            let m = count (sr.Search(b, s, Limits.nodes (int64 n)))
+            count (sr.Search(b, s, Limits.nodes (int64 p))) |> ignore
             m
     | [| "smp"; ms; t; div |] ->
         // Lazy SMP with t threads for ms per move
-        let ps = ParallelSearcher(geo, maxSnakes, w, int t)
-        ps.Diversity <- int div
-        fun b s ->
-            let stopAt = Diagnostics.Stopwatch.GetTimestamp() + int64 (float ms * float Diagnostics.Stopwatch.Frequency / 1000.0)
-            count (ps.Search(b, s, stopAt, int t - 1))
-    | [| "relaxold"; n |] ->
-        // nodes:<n> with 0.7.0's nearest-only relaxed re-search, for A/B
-        let sr = Searcher(geo, maxSnakes, w)
-        sr.NodeLimit <- int64 n
-        sr.RelaxNear <- false
-        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
-    | [| "legacy"; n |] ->
-        // nodes:<n> with the pre-0.6.1 unsound proofs, for A/B
-        let sr = Searcher(geo, maxSnakes, w)
-        sr.NodeLimit <- int64 n
-        sr.SoundProofs <- false
-        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
-    | [| "plain"; n |] ->
-        // nodes:<n> without move ordering, for A/B
-        let sr = Searcher(geo, maxSnakes, w)
-        sr.NodeLimit <- int64 n
-        sr.Ordering <- false
-        fun b s -> count (sr.SearchFor(b, s, 10_000.0))
+        let ps = ParallelSearcher(geo, maxSnakes, { cfg with Diversity = int div }, int t)
+        fun b s -> count (ps.Search(b, s, Limits.forMs (float ms), int t - 1))
     | _ -> failwith $"unknown bot {spec}"
 
-/// The shipped weights for the mode (before 0.7.4 bots without @ played Weights.Default, so every A/B that
-/// didn't spell out weights compared Default-weighted bots, not what the server plays).
-let modeWeights maxSnakes = if maxSnakes = 2 then Weights.Duel else Weights.Standard
-
-/// `@...` overrides single weights on top of the mode's shipped ones (a file, or name=value pairs).
-let overrideWeights (bse: Weights) (s: string) =
-    let text = if File.Exists s then File.ReadAllText s else s
-    let v = Array.copy bse.Values
-
-    for part in text.Split([| ','; '\n'; ';' |], StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries) do
-        match part.Split('=') with
-        | [| k; x |] -> v.[Array.findIndex ((=) (k.Trim())) Weights.Names] <- float (x.Trim())
-        | _ -> failwith $"bad weight entry {part}"
-
-    Weights v
-
+/// `@...` overrides single weights on top of the mode's shipped ones (before 0.7.4 bots without @ played the
+/// default weights, so every A/B that didn't spell out weights compared those, not what the server plays).
 let makeBot geo maxSnakes (spec: string) =
+    let basis = Weights.forSnakes maxSnakes
+
     match spec.IndexOf '@' with
-    | -1 -> makeBotW geo maxSnakes spec (modeWeights maxSnakes)
-    | i -> makeBotW geo maxSnakes spec.[.. i - 1] (overrideWeights (modeWeights maxSnakes) spec.[i + 1 ..])
+    | -1 -> makeBotW geo maxSnakes spec basis
+    | i -> makeBotW geo maxSnakes spec.[.. i - 1] (Weights.parseOver basis (readText spec.[i + 1 ..]))
 
 let shuffle (rng: Random) (a: 'T[]) =
     for i in a.Length - 1 .. -1 .. 1 do
@@ -340,7 +308,7 @@ let runTune (argv: string[]) =
     let batch = int (opt argv "--batch" "64")
     let par = int (opt argv "--par" (string Environment.ProcessorCount))
     let out = opt argv "--out" $"weights-{mode}.txt"
-    let theta = (match opt argv "--from" "" with "" -> Weights.Default | s -> parseWeights s).Values |> Array.copy
+    let theta = (match opt argv "--from" "" with "" -> Weights.defaults | s -> parseWeights s) |> Weights.toArray
     let k = theta.Length
     // Perturbation ~15% of the starting value (at least 0.5); integer-like weights still move since we round only for lenCap
     let c = theta |> Array.map (fun x -> max 0.5 (0.15 * abs x))
@@ -350,7 +318,7 @@ let runTune (argv: string[]) =
     let lr = float (opt argv "--lr" "0.4")
     let rngMaster = Random(int (opt argv "--seed" "7"))
     let sw = Diagnostics.Stopwatch.StartNew()
-    printfn "tuning %s at nodes:%s, %d iters x %d pairs; start %O" mode nodes iters batch (Weights theta)
+    printfn "tuning %s at nodes:%s, %d iters x %d pairs; start %s" mode nodes iters batch (Weights.format (Weights.ofArray theta))
 
     for it in 1 .. iters do
         let deltas = Array.init batch (fun _ -> Array.init k (fun _ -> if rngMaster.Next 2 = 0 then -1.0 else 1.0))
@@ -361,8 +329,8 @@ let runTune (argv: string[]) =
         Parallel.For(0, batch * 2, ParallelOptions(MaxDegreeOfParallelism = par), fun j ->
             let i = j / 2
             let flip = j % 2 = 1
-            let plus = Weights(Array.init k (fun p -> Math.Clamp(snapshot.[p] + c.[p] * deltas.[i].[p], lo.[p], hi.[p])))
-            let minus = Weights(Array.init k (fun p -> Math.Clamp(snapshot.[p] - c.[p] * deltas.[i].[p], lo.[p], hi.[p])))
+            let plus = Weights.ofArray (Array.init k (fun p -> Math.Clamp(snapshot.[p] + c.[p] * deltas.[i].[p], lo.[p], hi.[p])))
+            let minus = Weights.ofArray (Array.init k (fun p -> Math.Clamp(snapshot.[p] - c.[p] * deltas.[i].[p], lo.[p], hi.[p])))
             let ws = seats mode flip plus minus
             let isPlus = seats mode flip true false
             let bots = ws |> Array.map (fun w -> makeBotW geo11 ws.Length ("nodes:" + nodes) w)
@@ -384,10 +352,10 @@ let runTune (argv: string[]) =
             theta.[p] <- Math.Clamp(theta.[p] + a * c.[p] * g / float batch * 2.0, lo.[p], hi.[p])
 
         let decisive = results |> Array.sumBy abs
-        File.WriteAllText(out, (Weights theta).ToString().Replace(",", "\n") + "\n")
+        File.WriteAllText(out, (Weights.format (Weights.ofArray theta)).Replace(",", "\n") + "\n")
 
         if it % 5 = 0 || it = iters then
-            printfn "[%4d %5.0fs] decisive %.0f%%  %O" it sw.Elapsed.TotalSeconds (100.0 * decisive / float (2 * batch)) (Weights theta)
+            printfn "[%4d %5.0fs] decisive %.0f%%  %s" it sw.Elapsed.TotalSeconds (100.0 * decisive / float (2 * batch)) (Weights.format (Weights.ofArray theta))
 
     0
 
@@ -398,7 +366,7 @@ let runReuse (argv: string[]) =
     let d = int (opt argv "--depth" "7")
     let ponder = argv |> Array.contains "--ponder"
     let n = if mode = "duel" then 2 else 4
-    let w = if mode = "duel" then Weights.Duel else Weights.Standard
+    let cfg = SearchConfig.make (Weights.forSnakes n)
     let mutable fresh = 0L
     let mutable warm = 0L
     let mutable turns = 0
@@ -406,16 +374,13 @@ let runReuse (argv: string[]) =
     for g in 1..6 do
         let rng = Random(g)
         let b = setup rng n
-        let persistent = Searcher(geo11, n, w)
+        let persistent = Searcher(geo11, n, cfg)
         let mv = Array.zeroCreate<Dir> n
-        let bots = Array.init n (fun _ -> makeBotW geo11 n "nodes:20000" w)
+        let bots = Array.init n (fun _ -> makeBotW geo11 n "nodes:20000" cfg.Weights)
 
         while b.AliveCount > 1 && b.Turn < 300 && b.Alive 0 do
-            let f = Searcher(geo11, n, w)
-            f.MaxDepth <- d
-            let rf = f.SearchFor(b, 0, 60_000.0)
-            persistent.MaxDepth <- d
-            let rp = persistent.SearchFor(b, 0, 60_000.0)
+            let rf = Searcher(geo11, n, cfg).Search(b, 0, Limits.depth d)
+            let rp = persistent.Search(b, 0, Limits.depth d)
 
             if b.Turn > 0 && rf.Depth = d then
                 fresh <- fresh + rf.Nodes
@@ -423,8 +388,7 @@ let runReuse (argv: string[]) =
                 turns <- turns + 1
 
             if ponder then
-                persistent.MaxDepth <- d + 1
-                persistent.SearchFor(b, 0, 60_000.0) |> ignore
+                persistent.Search(b, 0, Limits.depth (d + 1)) |> ignore
 
             mv.[0] <- rf.Move
             for s in 1 .. n - 1 do
@@ -443,7 +407,7 @@ let runDepth (argv: string[]) =
     let nodes = int64 (opt argv "--nodes" "30000")
     let p = int64 (opt argv "--ponder" "18000")
     let n = if mode = "duel" then 2 else 4
-    let w = if mode = "duel" then Weights.Duel else Weights.Standard
+    let cfg = SearchConfig.make (Weights.forSnakes n)
     let sum = Array.zeroCreate<int64> 3
     let partial = Array.zeroCreate<int64> 3
     let mutable turns = 0
@@ -451,23 +415,21 @@ let runDepth (argv: string[]) =
     for g in 1..8 do
         let rng = Random(100 + g)
         let b = setup rng n
-        let sr = Array.init 3 (fun _ -> Searcher(geo11, n, w))
+        let sr = Array.init 3 (fun _ -> Searcher(geo11, n, cfg))
         let mv = Array.zeroCreate<Dir> n
-        let bots = Array.init n (fun _ -> makeBotW geo11 n ("nodes:" + string nodes) w)
+        let bots = Array.init n (fun _ -> makeBotW geo11 n ("nodes:" + string nodes) cfg.Weights)
 
         while b.AliveCount > 1 && b.Turn < 300 && b.Alive 0 do
             let r =
                 Array.init 3 (fun i ->
-                    let s = if i = 0 then Searcher(geo11, n, w) else sr.[i]
-                    s.NodeLimit <- nodes
-                    s.SearchFor(b, 0, 60_000.0))
+                    let s = if i = 0 then Searcher(geo11, n, cfg) else sr.[i]
+                    s.Search(b, 0, Limits.nodes nodes))
 
             for i in 0..2 do
                 sum.[i] <- sum.[i] + int64 r.[i].Depth
 
             turns <- turns + 1
-            sr.[2].NodeLimit <- p
-            sr.[2].SearchFor(b, 0, 60_000.0) |> ignore
+            sr.[2].Search(b, 0, Limits.nodes p) |> ignore
             mv.[0] <- r.[1].Move
             for s in 1 .. n - 1 do
                 if b.Alive s then mv.[s] <- bots.[s] b s

@@ -4,12 +4,12 @@ open Xunit
 open Snake.Engine
 open Snake.Engine.Tests.RulesTests
 
-let decide (b: Board) = Policy(geo, 4).Decide(b, 0)
+let decide (b: Board) = Policy.create geo 4 b 0
 
 [<Fact>]
 let ``voronoi splits an empty board symmetrically`` () =
     let b = board [ 100, [ (1, 5); (0, 5); (0, 5) ]; 100, [ (9, 5); (10, 5); (10, 5) ] ] []
-    let a = Analyzer(geo, 4)
+    let a = Territory(geo, 4)
     a.Voronoi b
     Assert.Equal(a.Area 0, a.Area 1)
     Assert.True(a.Area 0 > 40)
@@ -17,7 +17,7 @@ let ``voronoi splits an empty board symmetrically`` () =
 [<Fact>]
 let ``bitboard voronoi matches the scalar one`` () =
     let rng = System.Random(5)
-    let a = Analyzer(geo, 4)
+    let a = Territory(geo, 4)
     let mutable checkedPositions = 0
 
     for _ in 1..300 do
@@ -79,7 +79,7 @@ let ``goes for adjacent food when starving`` () =
 
 // ---- Searcher (iterative-deepening paranoid alpha-beta) ----
 
-let search (b: Board) = Searcher(geo, 4).SearchFor(b, 0, 50.0)
+let search (b: Board) = Searcher(geo, 4, SearchConfig.make Weights.defaults).Search(b, 0, Limits.forMs 50.0)
 
 [<Fact>]
 let ``search does not walk into a wall`` () =
@@ -120,5 +120,5 @@ let ``search completes several plies in a duel`` () =
 [<Fact>]
 let ``search returns a move with no time left`` () =
     let b = board [ 100, [ (5, 5); (5, 4); (5, 3) ]; 100, [ (1, 1); (1, 2); (1, 3) ] ] []
-    let r = Searcher(geo, 4).Search(b, 0, 0L)
+    let r = Searcher(geo, 4, SearchConfig.make Weights.defaults).Search(b, 0, Limits.until 0L)
     Assert.Contains(r.Move, [ Dir.Up; Dir.Left; Dir.Right ])

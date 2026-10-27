@@ -14,12 +14,50 @@ type SearchInfo =
       /// The paranoid search saw only losses, Move/Depth/Score come from the nearest-opponent-only re-search
       Relaxed: bool }
 
-/// Iterative-deepening paranoid alpha-beta over simultaneous moves.
-///
-/// One ply = I pick a move, then the opponents pick a joint reply knowing my move (pessimistic, which is what
-/// makes head-on collisions and cut-offs safe). Only opponents whose head can reach mine within the remaining
-/// plies are searched adversarially; far-away snakes play a cheap default move, so 4-snake games still get depth.
-/// All boards and move buffers are preallocated per ply; a search does not allocate.
+/// How a Searcher plays; fixed for its lifetime. The defaults (SearchConfig.make) are what ships; the switches exist
+/// for tests and arena A/B comparisons.
+type SearchConfig =
+    { Weights: Weights
+      /// Move ordering (TT hint + history); off = the plain fixed order
+      Ordering: bool
+      /// Reuse stored scores from the table, not just best-move hints
+      UseScores: bool
+      /// Only reuse scores stored at exactly the same remaining depth (keeps fixed-depth results identical; tests)
+      ExactDepthOnly: bool
+      /// false restores the pre-0.6.1 behaviour (far lone opponent played by Default, its deaths count as proven)
+      SoundProofs: bool
+      /// Relaxed re-search also keeps opponents within 2 steps adversarial. Off: on the ladder (0.7.1) it made the
+      /// relaxed re-search nearly as paranoid as the first, proving losses at depth ~4 and picking the move that dies
+      /// last in the worst case; Standard deaths went from 48% to 75% of games, half of them head-on.
+      RelaxNear: bool
+      /// How Lazy SMP helpers spread over depths: 0 = odd helpers start at depth 2 only; 2 = Stockfish-style depth
+      /// skipping. A1, 250 ms, 4 threads: +0.25 ply (0) vs +0.53 ply (2); rotating move order near the root was worse.
+      Diversity: int }
+
+module SearchConfig =
+    let make (w: Weights) =
+        { Weights = w
+          Ordering = true
+          UseScores = true
+          ExactDepthOnly = false
+          SoundProofs = true
+          RelaxNear = false
+          Diversity = 2 }
+
+/// When one search stops: at the Stopwatch timestamp StopAt, after Nodes nodes (0 = no limit; node limits make
+/// self-play deterministic and independent of machine load) or after iteration Depth, whichever comes first.
+[<Struct>]
+type Limits = { StopAt: int64; Nodes: int64; Depth: int }
+
+module Limits =
+    let until (stopAt: int64) = { StopAt = stopAt; Nodes = 0L; Depth = Int32.MaxValue }
+
+    let forMs (ms: float) =
+        until (Stopwatch.GetTimestamp() + int64 (ms * float Stopwatch.Frequency / 1000.0))
+
+    let nodes (n: int64) = { StopAt = Int64.MaxValue; Nodes = n; Depth = Int32.MaxValue }
+    let depth (d: int) = { StopAt = Int64.MaxValue; Nodes = 0L; Depth = d }
+
 /// Transposition table entry, 16 bytes. The slot index is the hash's low bits. Data is the score's bits;
 /// Key = meta ^^^ Data, meta = check (hash high 32 bits) << 32 | depth << 24 | flag << 16 | move << 8 | age,
 /// flag 0 none, 1 exact, 2 lower bound, 3 upper bound. The XOR makes a torn entry (two threads writing the same
@@ -43,14 +81,29 @@ type TTable(bits: int) =
 
     member _.Clear() = Array.Clear entries
 
+/// Iterative-deepening paranoid alpha-beta over simultaneous moves.
+///
+/// One ply = I pick a move, then the opponents pick a joint reply knowing my move (pessimistic, which is what
+/// makes head-on collisions and cut-offs safe). Only opponents whose head can reach mine within the remaining
+/// plies are searched adversarially; far-away snakes play a cheap default move, so 4-snake games still get depth.
+/// All boards and move buffers are preallocated per ply; a search does not allocate.
+/// The object holds what must outlive one search (table, move history) plus scratch space; how it plays is the
+/// immutable SearchConfig, and each Search returns its result as a value.
 [<Sealed>]
-type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
+type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTable, helper: int) =
     static let maxPly = 64
     static let win = 1e6
     static let likelyWin = 1e5
     static let checkMask = 255L
 
-    let analyzer = Analyzer(geo, maxSnakes, weights)
+    let weights = config.Weights
+    let ordering = config.Ordering
+    let useScores = config.UseScores
+    let exactDepthOnly = config.ExactDepthOnly
+    let soundProofs = config.SoundProofs
+    let relaxNear = config.RelaxNear
+    let diversity = config.Diversity
+    let territory = Territory(geo, maxSnakes)
     let boards = Array.init (maxPly + 2) (fun _ -> Board(geo, maxSnakes))
     let moves = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<Dir> maxSnakes)
     let myMoves = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<Dir> 4)
@@ -74,18 +127,10 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
     // misses per probe, which showed up on the A1's small caches).
     let tt = table.Entries
     let mutable age = 0uy
-    // Lazy SMP helper index (0 = main). Odd helpers start deepening at depth 2 so threads spread over depths.
-    let mutable helper = 0
-    // How helpers spread over depths: 0 = odd helpers start at depth 2 only; 2 = Stockfish-style depth skipping.
-    // A1, 250 ms, 4 threads: +0.25 ply (0) vs +0.53 ply (2); 1 (rotating move order near the root) was worse.
-    let mutable diversity = 2
-    let mutable useScores = true
-    let mutable exactDepthOnly = false
     let mutable stopRequested = false
     let histMe = Array.zeroCreate<int> (geo.Cells * 4)
     let histOpp = Array.zeroCreate<int> (geo.Cells * 4)
     let key = Array.zeroCreate<int> 4
-    let mutable ordering = true
     let mutable maxDepth = maxPly
 
     let mutable me = 0
@@ -93,64 +138,16 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
     let mutable nodes = 0L
     let mutable aborted = false
     let mutable nodeLimit = 0L
-    let mutable soundProofs = true
     // Re-search after a paranoid proven loss: only the nearest opponent is adversarial, no TT scores in or out
     let mutable relaxed = false
-    // Relaxed mode also keeps opponents within 2 steps adversarial. Off: on the ladder (0.7.1) it made the relaxed
-    // re-search nearly as paranoid as the first, proving losses at depth ~4 and picking the move that dies last in
-    // the worst case; Standard deaths went from 48% to 75% of games, half of them head-on.
-    let mutable relaxNear = false
 
-    /// Stop after this many nodes as well as at the deadline (0 = no limit). Makes self-play deterministic
-    /// and independent of how loaded the machine is.
-    member _.NodeLimit
-        with get () = nodeLimit
-        and set v = nodeLimit <- v
-
-    /// false restores the pre-0.6.1 behaviour (far lone opponent played by Default, its deaths count as proven),
-    /// for A/B in the arena only.
-    member _.SoundProofs
-        with get () = soundProofs
-        and set v = soundProofs <- v
-
-    new(geo, maxSnakes, weights) = Searcher(geo, maxSnakes, weights, null)
-    new(geo, maxSnakes) = Searcher(geo, maxSnakes, Weights.Default, null)
+    /// A Searcher with its own table. (Lazy SMP helpers share their main thread's table and pass their index,
+    /// 0 = main; odd helpers start deepening at depth 2 so threads spread over depths.)
+    new(geo, maxSnakes, config) = Searcher(geo, maxSnakes, config, null, 0)
 
     static member TTBits = ttBits
     static member val internal SkipSize = [| 1; 1; 2; 2; 2; 2; 3; 3; 3; 3; 3; 3; 4; 4; 4; 4; 4; 4; 4; 4 |]
     static member val internal SkipPhase = [| 0; 1; 0; 1; 2; 3; 0; 1; 2; 3; 4; 5; 0; 1; 2; 3; 4; 5; 6; 7 |]
-
-    member _.Helper
-        with get () = helper
-        and set v = helper <- v
-
-    member _.RelaxNear
-        with get () = relaxNear
-        and set v = relaxNear <- v
-
-    member _.Diversity
-        with get () = diversity
-        and set v = diversity <- v
-
-    /// Move ordering on/off (off = the plain fixed order; for tests and A/B comparisons).
-    member _.Ordering
-        with get () = ordering
-        and set v = ordering <- v
-
-    /// Deepest iteration to run (for fixed-depth tests).
-    member _.MaxDepth
-        with get () = maxDepth
-        and set v = maxDepth <- v
-
-    /// Reuse stored scores, not just best-move hints.
-    member _.UseScores
-        with get () = useScores
-        and set v = useScores <- v
-
-    /// Only reuse scores stored at exactly the same remaining depth (keeps fixed-depth results identical; tests).
-    member _.ExactDepthOnly
-        with get () = exactDepthOnly
-        and set v = exactDepthOnly <- v
 
     /// Ask a running Search (on another thread) to stop soon. Cleared when the next Search starts.
     member _.Stop() = Volatile.Write(&stopRequested, true)
@@ -378,7 +375,7 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
                         // deepening nor counts as a proof in the TT.
                         if simplified && soundProofs then likelyWin - float ply else win - float ply
                     elif depth = 1 then
-                        analyzer.Evaluate(child, me)
+                        Eval.evaluate weights territory child me
                     else
                         this.Max(ply + 1, depth - 1, a, min beta worst, 0)
 
@@ -514,18 +511,21 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
 
         result
 
-    member this.Search(root: Board, mySnake: int, stopAt: int64) : SearchInfo =
+    /// Best move for snake mySnake on root within `limits`. Always returns a legal move, even with no time at all.
+    member this.Search(root: Board, mySnake: int, limits: Limits) : SearchInfo =
         Volatile.Write(&stopRequested, false)
-        this.SearchCore(root, mySnake, stopAt)
+        this.SearchCore(root, mySnake, limits)
 
     /// Clears a pending Stop. ParallelSearcher does this before starting helpers, so a Stop that comes before a
     /// helper got going is not lost.
-    member _.ResetStop() = Volatile.Write(&stopRequested, false)
+    member internal _.ResetStop() = Volatile.Write(&stopRequested, false)
 
     /// Search without clearing a pending Stop.
-    member this.SearchCore(root: Board, mySnake: int, stopAt: int64) : SearchInfo =
+    member internal this.SearchCore(root: Board, mySnake: int, limits: Limits) : SearchInfo =
         me <- mySnake
-        deadline <- stopAt
+        deadline <- limits.StopAt
+        nodeLimit <- limits.Nodes
+        maxDepth <- limits.Depth
         nodes <- 0L
         aborted <- false
         boards.[0].CopyFrom root
@@ -561,52 +561,30 @@ type Searcher(geo: Geometry, maxSnakes: int, weights: Weights, shared: TTable) =
 
         { result with Nodes = nodes }
 
-    /// Convenience overload: search for `ms` milliseconds from now.
-    member this.SearchFor(root: Board, mySnake: int, ms: float) =
-        let stopAt = Stopwatch.GetTimestamp() + int64 (ms * float Stopwatch.Frequency / 1000.0)
-        this.Search(root, mySnake, stopAt)
 
 /// Lazy SMP: `threads` Searchers share one table and search the same root at once; the helpers mostly fill the
 /// table (their cut-offs and exact scores let the main thread skip work), and the deepest finished result wins.
 /// Each Searcher keeps its own boards, history and evaluator, so nothing but the table is shared.
 [<Sealed>]
-type ParallelSearcher(geo: Geometry, maxSnakes: int, weights: Weights, threads: int) =
+type ParallelSearcher(geo: Geometry, maxSnakes: int, config: SearchConfig, threads: int) =
     let table = TTable(Searcher.TTBits)
-
-    let workers =
-        Array.init (max 1 threads) (fun i ->
-            let s = Searcher(geo, maxSnakes, weights, table)
-            s.Helper <- i
-            s)
+    let workers = Array.init (max 1 threads) (fun i -> Searcher(geo, maxSnakes, config, table, i))
 
     let results = Array.zeroCreate<SearchInfo> workers.Length
 
     member _.Threads = workers.Length
-    member _.Main = workers.[0]
-
-    member _.Diversity
-        with get () = workers.[0].Diversity
-        and set v =
-            for w in workers do
-                w.Diversity <- v
-
-    member _.SoundProofs
-        with get () = workers.[0].SoundProofs
-        and set v =
-            for w in workers do
-                w.SoundProofs <- v
 
     member _.Clear() =
         for w in workers do
             w.Clear()
 
-    /// Searches with the main thread plus up to `helpers` extra threads (capped at Threads - 1), until `stopAt`.
-    member _.Search(root: Board, me: int, stopAt: int64, helpers: int) : SearchInfo =
+    /// Searches with the main thread plus up to `helpers` extra threads (capped at Threads - 1) within `limits`.
+    member _.Search(root: Board, me: int, limits: Limits, helpers: int) : SearchInfo =
         table.Age <- table.Age + 1uy
         let n = Math.Clamp(helpers, 0, workers.Length - 1)
 
         if n = 0 then
-            workers.[0].Search(root, me, stopAt)
+            workers.[0].Search(root, me, limits)
         else
             for i in 1..n do
                 workers.[i].ResetStop()
@@ -614,9 +592,9 @@ type ParallelSearcher(geo: Geometry, maxSnakes: int, weights: Weights, threads: 
             let tasks =
                 Array.init n (fun k ->
                     let i = k + 1
-                    Tasks.Task.Run(fun () -> results.[i] <- workers.[i].SearchCore(root, me, stopAt)))
+                    Tasks.Task.Run(fun () -> results.[i] <- workers.[i].SearchCore(root, me, limits)))
 
-            let main = workers.[0].Search(root, me, stopAt)
+            let main = workers.[0].Search(root, me, limits)
 
             // The main thread decides when to stop (deadline or a proven result); helpers follow
             for i in 1..n do

@@ -89,7 +89,7 @@ let measure name (seconds: float) (work: unit -> int) =
 
 /// Fixed-time search on mid-game positions: nodes/s and the average completed depth (what actually matters)
 let searchBench (positions: Board[]) (ms: float) (rounds: int) =
-    let sr = Searcher(geo, 4, Weights.Standard)
+    let sr = Searcher(geo, 4, SearchConfig.make Weights.standard)
     let mutable nodes = 0L
     let mutable depth = 0L
     let mutable n = 0
@@ -100,7 +100,7 @@ let searchBench (positions: Board[]) (ms: float) (rounds: int) =
             let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
             // Rounds repeat the same positions: start cold so the table cannot carry answers over
             sr.Clear()
-            let r = sr.SearchFor(p, me, ms)
+            let r = sr.Search(p, me, Limits.forMs ms)
             nodes <- nodes + r.Nodes
             depth <- depth + int64 r.Depth
             n <- n + 1
@@ -146,11 +146,8 @@ let orderBench () =
             let total o sc =
                 ps
                 |> Array.sumBy (fun b ->
-                    let sr = Searcher(geo, n, Weights.Standard)
-                    sr.Ordering <- o
-                    sr.UseScores <- sc
-                    sr.MaxDepth <- d
-                    (sr.SearchFor(b, 0, 600_000.0)).Nodes)
+                    let cfg = { SearchConfig.make Weights.standard with Ordering = o; UseScores = sc }
+                    (Searcher(geo, n, cfg).Search(b, 0, Limits.depth d)).Nodes)
 
             let a, h, t = total false false, total true false, total true true
             printfn "%-9s depth %d: plain %11d  hints %11d (%.2fx)  +scores %11d (%.2fx)" label d a h (float a / float h) t (float a / float t)
@@ -158,8 +155,8 @@ let orderBench () =
 /// Lazy SMP at a fixed time per position: nodes/s and average completed depth for 1..threads threads.
 let smpBench (positions: Board[]) (ms: float) (threads: int) =
     for t in 1..threads do
-        let ps = ParallelSearcher(geo, 4, Weights.Standard, t)
-        ps.Diversity <- (match Environment.GetEnvironmentVariable "SMP_DIV" with | null -> 0 | v -> int v)
+        let div = match Environment.GetEnvironmentVariable "SMP_DIV" with | null -> 2 | v -> int v
+        let ps = ParallelSearcher(geo, 4, { SearchConfig.make Weights.standard with Diversity = div }, t)
         let mutable nodes = 0L
         let mutable depth = 0L
         let sw = Stopwatch.StartNew()
@@ -167,15 +164,66 @@ let smpBench (positions: Board[]) (ms: float) (threads: int) =
         for p in positions do
             ps.Clear()
             let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
-            let stopAt = Stopwatch.GetTimestamp() + int64 (ms * float Stopwatch.Frequency / 1000.0)
-            let r = ps.Search(p, me, stopAt, t - 1)
+            let r = ps.Search(p, me, Limits.forMs ms, t - 1)
             nodes <- nodes + r.Nodes
             depth <- depth + int64 r.Depth
 
         printfn "smp %d thread(s) %4.0fms   %10.0f nodes/s   avg depth %.2f" t ms (float nodes / sw.Elapsed.TotalSeconds) (float depth / float positions.Length)
 
+/// Behaviour fingerprint for refactors: fixed-node searches in several configurations, evaluations and the
+/// baseline policy on fixed positions. Any change in the output means the engine's behaviour changed.
+let fingerprint () =
+    let lines = ResizeArray<string>()
+
+    for n in [ 2; 4 ] do
+        let ps = mixedPositions n 24
+
+        for wname, w in [ "std", Weights.standard; "stdPrev", Weights.standardPrev; "duel", Weights.duel; "def", Weights.defaults ] do
+            let t = Territory(geo, n)
+
+            for i, b in Array.indexed ps do
+                for s in 0 .. n - 1 do
+                    lines.Add(sprintf "eval %d %s %d %d %.6f" n wname i s (Eval.evaluate w t b s))
+
+            for cfg in [ "plain"; "noScores"; "legacy"; "noOrder"; "fixed4"; "persist" ] do
+                let c = SearchConfig.make w
+
+                let config, limits =
+                    match cfg with
+                    | "noScores" -> { c with UseScores = false }, Limits.nodes 6000L
+                    | "legacy" -> { c with SoundProofs = false }, Limits.nodes 6000L
+                    | "noOrder" -> { c with Ordering = false }, Limits.nodes 6000L
+                    | "fixed4" -> { c with ExactDepthOnly = true }, Limits.depth 4
+                    | _ -> c, Limits.nodes 6000L
+
+                let persistent = Searcher(geo, n, config)
+
+                for i, b in Array.indexed ps do
+                    let sr = if cfg = "persist" then persistent else Searcher(geo, n, config)
+                    let r = sr.Search(b, 0, limits)
+                    lines.Add(sprintf "search %d %s %s %d %O %d %.6f %d %b" n wname cfg i r.Move r.Depth r.Score r.Nodes r.Relaxed)
+
+                let ps1 = ParallelSearcher(geo, n, c, 2)
+
+                for i, b in Array.indexed ps do
+                    let r = ps1.Search(b, 0, Limits.nodes 6000L, 0)
+                    lines.Add(sprintf "par0 %d %s %s %d %O %d %.6f %d" n wname cfg i r.Move r.Depth r.Score r.Nodes)
+
+        let policy = Policy.create geo n
+
+        for i, b in Array.indexed ps do
+            lines.Add(sprintf "policy %d %d %O" n i (policy b 0))
+
+    let text = String.Join("\n", lines)
+    let hash = Security.Cryptography.SHA256.HashData(Text.Encoding.UTF8.GetBytes text) |> Convert.ToHexString
+    IO.File.WriteAllText("/tmp/snake-fingerprint.txt", text)
+    printfn "fingerprint %d lines %s" lines.Count hash
+
 [<EntryPoint>]
 let main argv =
+    if argv |> Array.contains "fingerprint" then
+        fingerprint ()
+        exit 0
     if argv |> Array.contains "smp" then
         let positions = samplePositions 32
         smpBench positions 50.0 2 // warm-up
@@ -214,12 +262,12 @@ let main argv =
         n)
 
     let positions = samplePositions 32
-    let an = Analyzer(geo, 4)
+    let an = Territory(geo, 4)
     let mutable i = 0
 
     measure "evaluate (voronoi)" 1.0 (fun () ->
         i <- (i + 1) % positions.Length
-        an.Evaluate(positions.[i], 0) |> ignore
+        Eval.evaluate Weights.defaults an positions.[i] 0 |> ignore
         1)
 
     measure "voronoi scalar" 1.0 (fun () ->
@@ -232,13 +280,13 @@ let main argv =
         an.VoronoiBits positions.[i]
         1)
 
-    let policy = Policy(geo, 4)
+    let policy = Policy.create geo 4
 
     measure "decide (1-ply paranoid)" 1.0 (fun () ->
         i <- (i + 1) % positions.Length
         let p = positions.[i]
         let me = (seq { 0 .. p.NumSnakes - 1 } |> Seq.find p.Alive)
-        policy.Decide(p, me) |> ignore
+        policy p me |> ignore
         1)
 
     0

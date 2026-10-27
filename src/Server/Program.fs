@@ -11,14 +11,7 @@ open Snake.Server.Api
 /// Searches until `stopAt` (a Stopwatch timestamp) with this game's persistent searcher.
 let decide (gs: GameState) (stopAt: int64) =
     let b, me = toBoard gs
-    // Duels and multi-snake games reward different things (e.g. length matters more 1v1), so they are tuned apart
-    let w =
-        let prev = Sessions.legacyArm gs.Game.Id gs.Board.Snakes.Length
-
-        if gs.Board.Snakes.Length = 2 then (if prev then Weights.DuelPrev else Weights.Duel)
-        elif prev then Weights.StandardPrev
-        else Weights.Standard
-    Sessions.search gs.Game.Id b me w stopAt
+    Sessions.search gs.Game.Id b me stopAt
 
 let msToTicks (ms: float) = int64 (ms * float Stopwatch.Frequency / 1000.0)
 
@@ -61,7 +54,7 @@ let main args =
     app.MapGet("/", Func<obj>(fun () -> box info)) |> ignore
 
     app.MapPost("/start", Func<GameState, IResult>(fun gs ->
-        log.LogInformation("start {game} {ruleset} {w}x{h} snakes={n} arm={arm}", gs.Game.Id, gs.Game.Ruleset.Name, gs.Board.Width, gs.Board.Height, gs.Board.Snakes.Length, (if Sessions.legacyArm gs.Game.Id gs.Board.Snakes.Length then "legacy" else "new"))
+        log.LogInformation("start {game} {ruleset} {w}x{h} snakes={n} arm={arm}", gs.Game.Id, gs.Game.Ruleset.Name, gs.Board.Width, gs.Board.Height, gs.Board.Snakes.Length, (if Sessions.legacyArm gs.Game.Id then "legacy" else "new"))
         Results.Ok())) |> ignore
 
     app.MapPost("/move", Func<GameState, obj>(fun gs ->

@@ -28,7 +28,7 @@ let threads =
 /// cores instead of each starting `threads` threads.
 let mutable private active = 0
 
-/// Diversity mode for the helpers (see Searcher.Diversity), switchable for experiments.
+/// Diversity mode for the helpers (see SearchConfig.Diversity), switchable for experiments.
 let private diversity =
     match Int32.TryParse(Environment.GetEnvironmentVariable "SNAKE_SMP_DIVERSITY") with
     | true, n -> n
@@ -41,8 +41,17 @@ let private diversity =
 let private abTest = Environment.GetEnvironmentVariable "SNAKE_AB" <> "0"
 
 /// Whether a game plays the legacy arm, from its id alone so the logs and game ids can be split afterwards.
-let legacyArm (gameId: string) (snakes: int) =
+let legacyArm (gameId: string) =
     abTest && gameId.Length > 0 && Uri.IsHexDigit gameId.[0] && Convert.ToInt32(string gameId.[0], 16) % 2 = 0
+
+/// Weights for a game: duels and multi-snake games reward different things (e.g. length matters more 1v1), so
+/// they are tuned apart; the legacy A/B arm plays the previous set.
+let weightsFor (gameId: string) (snakes: int) =
+    match snakes = 2, legacyArm gameId with
+    | true, false -> Weights.duel
+    | true, true -> Weights.duelPrev
+    | false, false -> Weights.standard
+    | false, true -> Weights.standardPrev
 
 /// Games whose /end never arrived (engine hiccup, restart in between) get dropped after this long.
 let private idleTicks = TimeSpan.FromMinutes(10.0).Ticks
@@ -54,14 +63,13 @@ let private sweep () =
         if now - Volatile.Read(&kv.Value.LastUsed) > idleTicks then sessions.TryRemove kv.Key |> ignore
 
 let private make (geo: Geometry) (maxSnakes: int) (w: Weights) (n: int) =
-    let p = ParallelSearcher(geo, maxSnakes, w, n)
-    p.Diversity <- diversity
-    p
+    ParallelSearcher(geo, maxSnakes, { SearchConfig.make w with Diversity = diversity }, n)
 
 /// Searches with this game's ParallelSearcher for the board's size and snake count, using the cores not taken by
 /// other running searches. Requests for one game never overlap in practice; if they ever do, the late one gets a
 /// throwaway single-threaded Searcher rather than waiting.
-let search (gameId: string) (b: Board) (me: int) (w: Weights) (stopAt: int64) : SearchInfo =
+let search (gameId: string) (b: Board) (me: int) (stopAt: int64) : SearchInfo =
+    let w = weightsFor gameId b.MaxSnakes
     if sessions.Count > 64 then sweep ()
 
     let s =
@@ -85,11 +93,11 @@ let search (gameId: string) (b: Board) (me: int) (w: Weights) (stopAt: int64) : 
         if Monitor.TryEnter s.Lock then
             try
                 let p = s.Searchers.GetOrAdd(key, fun _ -> make geo b.MaxSnakes w threads)
-                p.Search(b, me, stopAt, helpers)
+                p.Search(b, me, Limits.until stopAt, helpers)
             finally
                 Monitor.Exit s.Lock
         else
-            (make geo b.MaxSnakes w 1).Search(b, me, stopAt, 0)
+            (make geo b.MaxSnakes w 1).Search(b, me, Limits.until stopAt, 0)
     finally
         Interlocked.Decrement(&active) |> ignore
 

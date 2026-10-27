@@ -3,74 +3,13 @@ namespace Snake.Engine
 open System
 open System.Numerics
 
-/// Evaluation weights. Kept as a flat array so the tuner can perturb them generically; the names are the
-/// stable interface (weight files, logs). Defaults are the hand-picked starting point.
-[<Sealed>]
-type Weights(values: float[]) =
-    static let names =
-        [| "area"; "oppArea"; "len"; "lenCap"; "trapped"; "starve"; "noFoodHp"; "noFood"
-           "hungryHp"; "foodHungry"; "foodBehind"; "foodAhead"; "leadLen"; "trapRatio" |]
-
-    static let defaults = [| 10.0; 4.0; 30.0; 4.0; 50.0; 5000.0; 30.0; 10.0; 30.0; 8.0; 4.0; 1.0; 2.0; 1.0 |]
-
-    static member Names = names
-    static member Default = Weights(Array.copy defaults)
-    /// Tuned by `Arena tune --mode duel --nodes 5000` (SPSA, ~19k games), then refined at `--nodes 30000` (100 iters x 32
-    /// pairs, ~6.4k games; SPRT vs the 5k weights at 30k nodes: +35 elo [+12, +59]); copy of tune/weights-duel-30k.txt.
-    /// Area and oppArea are nearly collinear 1v1 (they sum to roughly the free board), so their split is arbitrary.
-    /// trapRatio 1 -> 3 (0.7.5): on 570 ladder duels, territory under twice the length was the strongest
-    /// predictor of the result beyond the evaluation; self-play +159 elo vs trapRatio 1 (1.5: +38, 2: +45, 3 vs 2: +71,
-    /// 4.5 vs 3: no gain).
-    static member val Duel = Weights.Parse "area=1.973,oppArea=1.681,len=100.778,lenCap=5.506,trapped=32.391,starve=2854.777,noFoodHp=28.094,noFood=9.887,hungryHp=49.46,foodHungry=7.999,foodBehind=3.469,foodAhead=0.118,leadLen=1.259,trapRatio=3"
-    /// Before 0.7.5, kept for the ladder A/B.
-    static member val DuelPrev = Weights.Parse "area=1.973,oppArea=1.681,len=100.778,lenCap=5.506,trapped=32.391,starve=2854.777,noFoodHp=28.094,noFood=9.887,hungryHp=49.46,foodHungry=7.999,foodBehind=3.469,foodAhead=0.118,leadLen=1.259"
-    /// Tuned by `Arena tune --mode standard --nodes 5000` (SPSA, ~10k games); copy of tune/weights-standard.txt
-    /// trapped 1.08 -> 10: on 610 ladder games a snake with less territory than its length dies within 10 turns
-    /// 4-20% of the time against 0.7% otherwise, yet the 5k-node SPSA had left the penalty near zero (+35 elo).
-    static member val Standard = Weights.Parse "area=2.616,oppArea=0.599,len=60.101,lenCap=5.895,trapped=10,starve=5854.651,noFoodHp=23.906,noFood=10.768,hungryHp=27.447,foodHungry=9.451,foodBehind=2.741,foodAhead=2.194,leadLen=3.089"
-    /// Before 0.7.4, kept for the ladder A/B.
-    static member val StandardPrev = Weights.Parse "area=2.616,oppArea=0.599,len=60.101,lenCap=5.895,trapped=1.078,starve=5854.651,noFoodHp=23.906,noFood=10.768,hungryHp=27.447,foodHungry=9.451,foodBehind=2.741,foodAhead=2.194,leadLen=3.089"
-    member _.Values = values
-    member _.Area = values.[0]
-    member _.OppArea = values.[1]
-    member _.Len = values.[2]
-    member _.LenCap = values.[3]
-    member _.Trapped = values.[4]
-    member _.Starve = values.[5]
-    member _.NoFoodHp = values.[6]
-    member _.NoFood = values.[7]
-    member _.HungryHp = values.[8]
-    member _.FoodHungry = values.[9]
-    member _.FoodBehind = values.[10]
-    member _.FoodAhead = values.[11]
-    /// Territory below trapRatio x length counts as trapped (1 = can't even hold the body).
-    member _.TrapRatio = if values.Length > 13 then values.[13] else 1.0
-    member _.LeadLen = values.[12]
-
-    /// "name=value,name=value" (one per line also works); unknown names are an error, missing ones keep defaults.
-    static member Parse(text: string) =
-        let v = Array.copy defaults
-
-        for part in text.Split([| ','; '\n'; ';' |], StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries) do
-            match part.Split('=') with
-            | [| k; x |] ->
-                match Array.tryFindIndex ((=) (k.Trim())) names with
-                | Some i -> v.[i] <- Double.Parse(x.Trim(), Globalization.CultureInfo.InvariantCulture)
-                | None -> failwith $"unknown weight {k}"
-            | _ -> failwith $"bad weight entry {part}"
-
-        Weights v
-
-    override _.ToString() =
-        Array.map2 (fun (n: string) (x: float) -> n + "=" + x.ToString("0.###", Globalization.CultureInfo.InvariantCulture)) names values
-        |> String.concat ","
-
 /// Board analysis: Voronoi territory that accounts for when bodies vacate.
 /// The body segment at index k (counting from the head) on a snake of length L leaves after L-k turns.
 /// So a cell is only passable once the arrival distance d >= its vacate time.
-/// All buffers are preallocated, so evaluation does not allocate.
+/// All buffers are preallocated, so it does not allocate; that is why this one is an object (scratch space for the
+/// hot path), while everything that only reads its result is a plain function (see Eval).
 [<Sealed>]
-type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
+type Territory(geo: Geometry, maxSnakes: int) =
     let cells = geo.Cells
     let dist = Array.zeroCreate<int> cells
     /// -1 unreached, -2 reached by several snakes at the same time (contested), otherwise the snake index
@@ -99,8 +38,6 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
     let nc0Lo, nc0Hi = maskOf (fun c -> geo.X c <> 0) 0, maskOf (fun c -> geo.X c <> 0) 1
     let ncLLo, ncLHi = maskOf (fun c -> geo.X c <> geo.Width - 1) 0, maskOf (fun c -> geo.X c <> geo.Width - 1) 1
     let w1 = geo.Width
-
-    new(geo, maxSnakes) = Analyzer(geo, maxSnakes, Weights.Default)
 
     member _.Area(s: int) = area.[s]
     /// Distance to the nearest food inside the snake's own territory; Int32.MaxValue when there is none.
@@ -297,18 +234,42 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
                 if b.IsFood c && dist.[c] < nearestFood.[o] then
                     nearestFood.[o] <- dist.[c]
 
-    /// The evaluation formula on the raw features, shared with the Texel tuner (which precomputes the features once
-    /// and only re-weighs them).
-    static member Combine(w: Weights, myArea: int, maxOppArea: int, myLen: int, maxOppLen: int, others: int, hp: int, nf: int) =
+/// The raw evaluation features of one snake. Kept separate from the weights so the Texel tuner can compute them once
+/// and re-weigh them many times.
+[<Struct>]
+type Features =
+    { MyArea: int
+      MaxOppArea: int
+      MyLen: int
+      MaxOppLen: int
+      /// Living opponents
+      Others: int
+      Hp: int
+      /// Distance to the nearest food in my territory, Int32.MaxValue when there is none
+      NearestFood: int }
+
+module Eval =
+    /// Score for a dead snake / the only survivor.
+    [<Literal>]
+    let Loss = -1e6
+
+    [<Literal>]
+    let Win = 1e6
+
+    /// The evaluation formula.
+    let combine (w: Weights) (f: Features) =
         let cap = int w.LenCap
-        let lenDiff = if others = 0 then 0 else Math.Clamp(myLen - maxOppLen, -cap, cap)
-        let mutable score = w.Area * float myArea - w.OppArea * float maxOppArea + w.Len * float lenDiff
+        let lenDiff = if f.Others = 0 then 0 else Math.Clamp(f.MyLen - f.MaxOppLen, -cap, cap)
+        let mutable score = w.Area * float f.MyArea - w.OppArea * float f.MaxOppArea + w.Len * float lenDiff
 
         // Not enough territory to hold our own body: we will most likely get trapped
-        let need = w.TrapRatio * float myLen
+        let need = w.TrapRatio * float f.MyLen
 
-        if float myArea < need then
-            score <- score - w.Trapped * (need - float myArea)
+        if float f.MyArea < need then
+            score <- score - w.Trapped * (need - float f.MyArea)
+
+        let nf = f.NearestFood
+        let hp = f.Hp
 
         if nf = Int32.MaxValue then
             if float hp < w.NoFoodHp then score <- score - w.NoFood * (w.NoFoodHp - float hp)
@@ -324,115 +285,125 @@ type Analyzer(geo: Geometry, maxSnakes: int, w: Weights) =
 
         score
 
-    /// Score from snake me's point of view. Death = -1e6, being the only survivor = +1e6.
-    member this.Evaluate(b: Board, me: int) : float =
+    /// Features of snake me from a filled Territory (Territory.Voronoi b already run).
+    let features (t: Territory) (b: Board) (me: int) =
+        let mutable others = 0
+        let mutable maxOppArea = 0
+        let mutable maxOppLen = 0
+
+        for s in 0 .. b.NumSnakes - 1 do
+            if s <> me && b.Alive s then
+                others <- others + 1
+                maxOppArea <- max maxOppArea (t.Area s)
+                maxOppLen <- max maxOppLen (b.Length s)
+
+        { MyArea = t.Area me
+          MaxOppArea = maxOppArea
+          MyLen = b.Length me
+          MaxOppLen = maxOppLen
+          Others = others
+          Hp = b.Health me
+          NearestFood = t.NearestFood me }
+
+    /// Score from snake me's point of view: Loss if dead, Win if the only survivor, else the weighted features.
+    /// `t` is scratch space (its contents are overwritten).
+    let evaluate (w: Weights) (t: Territory) (b: Board) (me: int) : float =
         if not (b.Alive me) then
-            -1e6
+            Loss
         else
-            let n = b.NumSnakes
             let mutable others = 0
 
-            for s in 0 .. n - 1 do
+            for s in 0 .. b.NumSnakes - 1 do
                 if s <> me && b.Alive s then others <- others + 1
 
-            if n > 1 && others = 0 then
-                1e6
+            if b.NumSnakes > 1 && others = 0 then
+                Win
             else
-                this.Voronoi b
-                let myLen = b.Length me
-                let mutable maxOppArea = 0
-                let mutable maxOppLen = 0
-
-                for s in 0 .. n - 1 do
-                    if s <> me && b.Alive s then
-                        maxOppArea <- max maxOppArea area.[s]
-                        maxOppLen <- max maxOppLen (b.Length s)
-
-                Analyzer.Combine(w, area.[me], maxOppArea, myLen, maxOppLen, others, b.Health me, nearestFood.[me])
+                t.Voronoi b
+                combine w (features t b me)
 
 /// Baseline policy: one-ply paranoid search. For each of my moves, enumerate every combination of opponent replies
 /// (excluding off-board moves and turning back onto the neck) and take the worst case; break ties on the average.
-[<Sealed>]
-type Policy(geo: Geometry, maxSnakes: int) =
-    let analyzer = Analyzer(geo, maxSnakes)
-    let scratch = Board(geo, maxSnakes)
-    let moves = Array.zeroCreate<Dir> maxSnakes
-    let opp = Array.zeroCreate<int> maxSnakes
-    let oppMoves = Array.zeroCreate<Dir> (maxSnakes * 4)
-    let oppCount = Array.zeroCreate<int> maxSnakes
-    let odo = Array.zeroCreate<int> maxSnakes
+module Policy =
+    /// A decision function with its own scratch space (not thread-safe; make one per thread).
+    let create (geo: Geometry) (maxSnakes: int) : Board -> int -> Dir =
+        let territory = Territory(geo, maxSnakes)
+        let scratch = Board(geo, maxSnakes)
+        let moves = Array.zeroCreate<Dir> maxSnakes
+        let opp = Array.zeroCreate<int> maxSnakes
+        let oppMoves = Array.zeroCreate<Dir> (maxSnakes * 4)
+        let oppCount = Array.zeroCreate<int> maxSnakes
+        let odo = Array.zeroCreate<int> maxSnakes
 
-    member _.Analyzer = analyzer
+        fun (b: Board) (me: int) ->
+            let n = b.NumSnakes
+            let mutable no = 0
 
-    member _.Decide(b: Board, me: int) : Dir =
-        let n = b.NumSnakes
-        let mutable no = 0
+            for s in 0 .. n - 1 do
+                if s <> me && b.Alive s then
+                    opp.[no] <- s
+                    let h = b.Head s
+                    let neck = if b.Length s > 1 then b.Body(s, 1) else -1
+                    let mutable k = 0
 
-        for s in 0 .. n - 1 do
-            if s <> me && b.Alive s then
-                opp.[no] <- s
-                let h = b.Head s
-                let neck = if b.Length s > 1 then b.Body(s, 1) else -1
-                let mutable k = 0
+                    for d in Dir.all do
+                        let nb = geo.Neighbor(h, d)
 
-                for d in Dir.all do
-                    let nb = geo.Neighbor(h, d)
+                        if nb >= 0 && nb <> neck then
+                            oppMoves.[no * 4 + k] <- d
+                            k <- k + 1
 
-                    if nb >= 0 && nb <> neck then
-                        oppMoves.[no * 4 + k] <- d
-                        k <- k + 1
+                    if k = 0 then
+                        oppMoves.[no * 4] <- Dir.Up
+                        k <- 1
 
-                if k = 0 then
-                    oppMoves.[no * 4] <- Dir.Up
-                    k <- 1
+                    oppCount.[no] <- k
+                    no <- no + 1
 
-                oppCount.[no] <- k
-                no <- no + 1
+            let myHead = b.Head me
+            let mutable best = Dir.Up
+            let mutable bestWorst = Double.NegativeInfinity
+            let mutable bestAvg = Double.NegativeInfinity
 
-        let myHead = b.Head me
-        let mutable best = Dir.Up
-        let mutable bestWorst = Double.NegativeInfinity
-        let mutable bestAvg = Double.NegativeInfinity
+            for d in Dir.all do
+                if geo.Neighbor(myHead, d) >= 0 then
+                    moves.[me] <- d
+                    Array.Clear(odo)
+                    let mutable worst = Double.PositiveInfinity
+                    let mutable sum = 0.0
+                    let mutable cnt = 0
+                    let mutable fin = false
 
-        for d in Dir.all do
-            if geo.Neighbor(myHead, d) >= 0 then
-                moves.[me] <- d
-                Array.Clear(odo)
-                let mutable worst = Double.PositiveInfinity
-                let mutable sum = 0.0
-                let mutable cnt = 0
-                let mutable fin = false
+                    while not fin do
+                        for i in 0 .. no - 1 do
+                            moves.[opp.[i]] <- oppMoves.[i * 4 + odo.[i]]
 
-                while not fin do
-                    for i in 0 .. no - 1 do
-                        moves.[opp.[i]] <- oppMoves.[i * 4 + odo.[i]]
+                        scratch.CopyFrom b
+                        scratch.Step moves
+                        let v = Eval.evaluate Weights.defaults territory scratch me
+                        worst <- min worst v
+                        sum <- sum + v
+                        cnt <- cnt + 1
+                        // Odometer: advance to the next combination of opponent moves
+                        let mutable i = 0
+                        let mutable carry = true
 
-                    scratch.CopyFrom b
-                    scratch.Step moves
-                    let v = analyzer.Evaluate(scratch, me)
-                    worst <- min worst v
-                    sum <- sum + v
-                    cnt <- cnt + 1
-                    // Odometer: advance to the next combination of opponent moves
-                    let mutable i = 0
-                    let mutable carry = true
+                        while carry && i < no do
+                            odo.[i] <- odo.[i] + 1
 
-                    while carry && i < no do
-                        odo.[i] <- odo.[i] + 1
+                            if odo.[i] = oppCount.[i] then
+                                odo.[i] <- 0
+                                i <- i + 1
+                            else
+                                carry <- false
 
-                        if odo.[i] = oppCount.[i] then
-                            odo.[i] <- 0
-                            i <- i + 1
-                        else
-                            carry <- false
+                        if carry then fin <- true
 
-                    if carry then fin <- true
+                    let avg = sum / float cnt
 
-                let avg = sum / float cnt
+                    if worst > bestWorst || (worst = bestWorst && avg > bestAvg) then
+                        best <- d
+                        bestWorst <- worst
+                        bestAvg <- avg
 
-                if worst > bestWorst || (worst = bestWorst && avg > bestAvg) then
-                    best <- d
-                    bestWorst <- worst
-                    bestAvg <- avg
-
-        best
+            best
