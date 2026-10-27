@@ -98,6 +98,8 @@ type Board(geo: Geometry, maxSnakes: int) =
     let mutable numSnakes = 0
     let mutable turn = 0
     let mutable hazardDamage = 0
+    /// Any hazard cell at all; lets CopyFrom skip the hazard array on the standard ladder (no hazards).
+    let mutable hasHazard = false
     /// Zobrist hash of everything the game's future depends on except the turn number: living snakes' heads,
     /// bodies, health and length, food and hazards. Maintained incrementally; see ComputeHash.
     let mutable hash = 0UL
@@ -132,6 +134,7 @@ type Board(geo: Geometry, maxSnakes: int) =
     member internal _.HeadPosArr = headPos
     member internal _.AliveArr = alive
     member internal _.RingArr = ring
+    member internal _.RingSize = ringSize
     member internal _.FoodArr = food
     member internal _.HazardArr = hazard
     member internal _.OccArr = occ
@@ -149,6 +152,7 @@ type Board(geo: Geometry, maxSnakes: int) =
         and set v = hazardDamage <- v
 
     member _.Hash = hash
+    member internal _.HasHazard = hasHazard
     member _.OccLo = occLo
     member _.OccHi = occHi
     member _.FoodLo = foodLo
@@ -197,6 +201,7 @@ type Board(geo: Geometry, maxSnakes: int) =
     member _.AddHazard(c: int) =
         if hazard[c] = 0uy then hash <- hash ^^^ geo.ZHaz c
         hazard[c] <- hazard[c] + 1uy
+        hasHazard <- true
 
     /// body[0] is the head. Returns the snake's index.
     member _.AddSnake(hp: int, body: int[]) : int =
@@ -244,7 +249,9 @@ type Board(geo: Geometry, maxSnakes: int) =
                 if first < length[s] then Array.Copy(src, b, ring, b, length[s] - first)
 
         Array.Copy(o.FoodArr, food, cells)
-        Array.Copy(o.HazardArr, hazard, cells)
+        // Hazards never change during search; both boards hazard-free means both arrays are all zero
+        if hasHazard || o.HasHazard then Array.Copy(o.HazardArr, hazard, cells)
+        hasHazard <- o.HasHazard
         Array.Copy(o.OccArr, occ, cells)
 
     member this.Clone() =

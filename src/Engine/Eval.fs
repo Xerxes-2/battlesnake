@@ -24,6 +24,9 @@ type Territory(geo: Geometry, maxSnakes: int) =
     let bitsOk = cells <= 128
     let frLo = Array.zeroCreate<uint64> (maxSnakes + 1)
     let frHi = Array.zeroCreate<uint64> (maxSnakes + 1)
+    // relLo/relHi[d]: body cells that become passable at BFS level d (grown on demand)
+    let mutable relLo = Array.zeroCreate<uint64> (cells + 2)
+    let mutable relHi = Array.zeroCreate<uint64> (cells + 2)
 
     let maskOf (f: int -> bool) (half: int) =
         let mutable m = 0UL
@@ -93,6 +96,40 @@ type Territory(geo: Geometry, maxSnakes: int) =
 
         frLo[n] <- twLo
         frHi[n] <- twHi
+
+        // Segment k frees up once d >= len - k. A cell stacked after eating (k and k-1 on the same cell)
+        // is freed by its younger copy one level later, matching the scalar max over segments.
+        // One pass over the ring buffers instead of two Body lookups per snake per level.
+        if maxLen > relLo.Length then
+            relLo <- Array.zeroCreate maxLen
+            relHi <- Array.zeroCreate maxLen
+
+        let rl = relLo
+        let rh = relHi
+        Array.Clear(rl, 0, maxLen)
+        Array.Clear(rh, 0, maxLen)
+        let ring = b.RingArr
+        let rs = b.RingSize
+        let rmask = rs - 1
+
+        for s in 0 .. n - 1 do
+            if b.Alive s then
+                let len = b.Length s
+                let bs = s * rs
+                let hp = b.HeadPosArr[s]
+                let mutable prev = ring[bs + hp]
+
+                for k in 1 .. len - 1 do
+                    let c = ring[bs + ((hp + k) &&& rmask)]
+
+                    if c <> prev then
+                        let c = int c
+                        let d = len - k
+
+                        if c < 64 then rl[d] <- rl[d] ||| (1UL <<< c) else rh[d] <- rh[d] ||| (1UL <<< (c - 64))
+
+                    prev <- c
+
         let mutable rLo = onLo
         let mutable rHi = onHi
         let fdLo = b.FoodLo
@@ -106,21 +143,9 @@ type Territory(geo: Geometry, maxSnakes: int) =
         while active do
             d <- d + 1
 
-            // Segment k frees up once d >= len - k. A cell stacked after eating (k and k-1 on the same cell)
-            // is freed by its younger copy one level later, matching the scalar max over segments.
             if d < maxLen then
-                for s in 0 .. n - 1 do
-                    if b.Alive s then
-                        let k = b.Length s - d
-
-                        if k >= 1 then
-                            let c = b.Body(s, k)
-
-                            if c <> b.Body(s, k - 1) then
-                                if c < 64 then
-                                    blLo <- blLo &&& ~~~(1UL <<< c)
-                                else
-                                    blHi <- blHi &&& ~~~(1UL <<< (c - 64))
+                blLo <- blLo &&& ~~~rl[d]
+                blHi <- blHi &&& ~~~rh[d]
 
             let freeLo = fullLo &&& ~~~(rLo ||| blLo)
             let freeHi = fullHi &&& ~~~(rHi ||| blHi)
