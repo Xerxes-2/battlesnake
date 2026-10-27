@@ -36,6 +36,10 @@ type SearchConfig =
         /// How Lazy SMP helpers spread over depths: 0 = odd helpers start at depth 2 only; 2 = Stockfish-style depth
         /// skipping. A1, 250 ms, 4 threads: +0.25 ply (0) vs +0.53 ply (2); rotating move order near the root was worse.
         Diversity: int
+        /// 0.7.6: try the reply combination that refuted the previous own move first (killer-style)
+        Refutation: bool
+        /// 0.7.6: null-window scout for later own moves at depth >= 3, full re-search on fail high
+        Pvs: bool
     }
 
 module SearchConfig =
@@ -46,7 +50,9 @@ module SearchConfig =
           ExactDepthOnly = false
           SoundProofs = true
           RelaxNear = false
-          Diversity = 2 }
+          Diversity = 2
+          Refutation = true
+          Pvs = true }
 
 /// When one search stops: at the Stopwatch timestamp StopAt, after Nodes nodes (0 = no limit; node limits make
 /// self-play deterministic and independent of machine load) or after iteration Depth, whichever comes first.
@@ -100,6 +106,8 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     let soundProofs = config.SoundProofs
     let relaxNear = config.RelaxNear
     let diversity = config.Diversity
+    let refutation = config.Ordering && config.Refutation
+    let pvs = config.Pvs
     let territory = Territory(geo, maxSnakes)
     let boards = Array.init (maxPly + 2) (fun _ -> Board(geo, maxSnakes))
     let moves = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<Dir> maxSnakes)
@@ -360,7 +368,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                 let a = max alpha best
                 let mutable worst = Double.PositiveInfinity
                 // PVS: after the first move, only ask "does this beat a?" with a null window; re-search if it does
-                let mutable scout = depth >= 3 && i > 0 && a > Double.NegativeInfinity && a < beta
+                let mutable scout = pvs && depth >= 3 && i > 0 && a > Double.NegativeInfinity && a < beta
                 let mutable pass = true
 
                 while pass do
@@ -423,7 +431,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                     if scout && worst > a && not aborted then scout <- false else pass <- false
 
                 // The reply that hurt this move most is tried first against the next one (killer-style)
-                if ordering && not aborted then
+                if refutation && not aborted then
                     for j in 0 .. na - 1 do
                         let k = rf[j]
 
