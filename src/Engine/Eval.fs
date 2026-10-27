@@ -53,6 +53,8 @@ type Territory(geo: Geometry, maxSnakes: int) =
     /// Same result as VoronoiScalar for Area/NearestFood, one BFS level per iteration over whole bitboards.
     /// A board is two uint64 halves (cells 0-63 in lo, 64-127 in hi); UInt128 was only ~1.3x faster than the
     /// scalar BFS because its variable shifts are branchy, the hand-split version is what makes this pay off.
+    /// Both halves in one Vector128 (NEON EXT / SSE byte shifts for the carries) gave the same results at 0.41x the
+    /// speed on the A1 and 0.49x on x86: the cross-lane carries and lane extracts cost more than the halved op count.
     member _.VoronoiBits(b: Board) =
         let n = b.NumSnakes
         let mutable onLo = 0UL
