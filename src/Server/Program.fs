@@ -102,7 +102,7 @@ let main args =
         "/move",
         Func<GameState, _>(fun gs ->
             let t0 = Time.now ()
-            let budget, net = Clock.budget gs.Game.Id gs.Game.Timeout gs.You.Latency
+            let budget, net = Clock.budget gs.Game.Id gs.Turn gs.Game.Timeout gs.You.Latency
             let r = decide gs (t0 + Time.ticks budget)
             let took = Time.since t0
             Clock.record gs.Game.Id took

@@ -43,8 +43,15 @@ let budgetFor (net: float<ms>) (timeout: int) =
     let timeout = if timeout > 0 then float timeout * 1.0<ms> else 500.0<ms>
     min (timeout - 50.0<ms>) (max 10.0<ms> (timeout - net - margin)), net
 
+/// Turns before this keep at least `firstTurnNet`: the engine sometimes opens a fresh connection on turns 1-2 as
+/// well (ladder 0.7.6: net max 252/325ms on t=1/2 vs a 163ms median), and a timeout there repeats our opening move
+/// from a corner into the wall — 5 dead-on-turn-2 losses in ~600 games. Opening search depth costs nothing.
+let coldTurns = 3
+
 /// Search time for this turn, and the network estimate it assumed.
-let budget (gameId: string) (timeout: int) (latency: string) =
+let budget (gameId: string) (turn: int) (timeout: int) (latency: string) =
+    let budgetFor net timeout = budgetFor (if turn < coldTurns && known net then max net firstTurnNet else net) timeout
+
     if games.Count > 10_000 then games.Clear() // games whose /end never arrived
 
     let c = games.GetOrAdd(gameId, fun _ -> { Net = unknown; LastCompute = unknown })

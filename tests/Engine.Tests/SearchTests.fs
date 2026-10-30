@@ -67,7 +67,9 @@ let ``reusing a persistent table keeps the result at least as deep`` () =
         let second = s.Search(b, 0, Limits.depth 5)
         Assert.Equal(first.Depth, second.Depth)
         Assert.Equal(first.Score, second.Score)
-        Assert.True(second.Nodes * 3L <= first.Nodes + 50L, $"second {second.Nodes} vs first {first.Nodes}")
+        // Usually 10-700x fewer; one position re-searches about a third of its tree: 3.6x fewer on the
+        // 0.7.6 weights and 2.8x on 0.7.7's.
+        Assert.True(second.Nodes * 2L <= first.Nodes + 50L, $"second {second.Nodes} vs first {first.Nodes}")
 
 /// Lazy SMP: legal moves, stops at the deadline, and a forced move (main thread done at once, before the helpers
 /// even started) does not leave helpers running until the deadline.

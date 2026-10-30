@@ -300,16 +300,16 @@ module Eval =
         let nf = f.NearestFood
         let hp = f.Hp
 
+        let fw =
+            if float hp < w.HungryHp then w.FoodHungry
+            elif float lenDiff < w.LeadLen then w.FoodBehind
+            else w.FoodAhead
+
         if nf = Int32.MaxValue then
             if float hp < w.NoFoodHp then score <- score - w.NoFood * (w.NoFoodHp - float hp)
+            score <- score - fw * w.NoFoodDist
         else
             if nf >= hp then score <- score - w.Starve
-
-            let fw =
-                if float hp < w.HungryHp then w.FoodHungry
-                elif float lenDiff < w.LeadLen then w.FoodBehind
-                else w.FoodAhead
-
             score <- score - fw * float nf
 
         score
