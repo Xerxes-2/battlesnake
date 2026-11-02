@@ -37,6 +37,9 @@ let fixedDepth (ordering: bool) (depth: int) (b: Board) =
     let cfg =
         { SearchConfig.make Weights.standard with
             Ordering = ordering
+            // Reused table scores are not always exact (2 of 900 searches in positions 5 300 at depth 3-5 differ
+            // from the table-less ones, with or without the guard); the guard shifts which positions show it.
+            TimeoutGuard = 0.0
             ExactDepthOnly = true }
 
     Searcher(geo, 4, cfg).Search(b, 0, Limits.depth depth)
@@ -91,3 +94,19 @@ let ``parallel searcher stops on time and plays legal moves`` () =
     let r = ps.Search(b, 0, Limits.forMs 2000.0<ms>, 3)
     Assert.Equal(Dir.Up, r.Move)
     Assert.True(Time.since t0 < 500.0<ms>, $"forced move took {Time.since t0} ms")
+
+
+[<Fact>]
+let ``the timeout guard keeps the head from pointing at a wall`` () =
+    // Head at (1,9), neck at (0,9), hungry, food above: Up eats on the top row, where a lost answer next turn means
+    // Up again, into the wall.
+    let b = Board(geo, 2)
+    b.AddSnake(5, [| geo.Cell(1, 9); geo.Cell(0, 9); geo.Cell(0, 8) |]) |> ignore
+    b.SetFood(geo.Cell(1, 10), true)
+    b.AddSnake(100, [| geo.Cell(9, 1); geo.Cell(9, 0); geo.Cell(10, 0) |]) |> ignore
+
+    let search g =
+        Searcher(geo, 2, { SearchConfig.make Weights.duel with TimeoutGuard = g }).Search(b, 0, Limits.depth 1)
+    // A guard larger than any evaluation difference decides; without it Up (the food) wins
+    Assert.Equal(Dir.Up, (search 0.0).Move)
+    Assert.NotEqual(Dir.Up, (search 1e5).Move)

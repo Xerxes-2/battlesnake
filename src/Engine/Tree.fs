@@ -40,6 +40,11 @@ type SearchConfig =
         Refutation: bool
         /// 0.7.6: null-window scout for later own moves at depth >= 3, full re-search on fail high
         Pvs: bool
+        /// 0.7.8: root moves after which going straight on next turn hits a wall lose this much. When a
+        /// response times out the engine repeats our last move; 0.7.7 lost 7 of 584 ladder games to that, mid-game,
+        /// heading into a wall. 0 = off. Self-play, 30k nodes, 2 vs 0: duel +7 [-11, +25], standard +2 [-13, +18]
+        /// without timeouts; duel +14 [-0, +28] with 1% of answers lost. 20 cost duel -15 and standard -72.
+        TimeoutGuard: float
     }
 
 module SearchConfig =
@@ -52,7 +57,8 @@ module SearchConfig =
           RelaxNear = false
           Diversity = 2
           Refutation = true
-          Pvs = true }
+          Pvs = true
+          TimeoutGuard = 2.0 }
 
 /// When one search stops: at the Stopwatch timestamp StopAt, after Nodes nodes (0 = no limit; node limits make
 /// self-play deterministic and independent of machine load) or after iteration Depth, whichever comes first.
@@ -108,6 +114,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     let diversity = config.Diversity
     let refutation = config.Ordering && config.Refutation
     let pvs = config.Pvs
+    let guard = config.TimeoutGuard
     let territory = Territory(geo, maxSnakes)
     let boards = Array.init (maxPly + 2) (fun _ -> Board(geo, maxSnakes))
     let moves = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<Dir> maxSnakes)
@@ -119,6 +126,8 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     let refute = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<int> maxSnakes)
     let tmp = Array.zeroCreate<Dir> 4
     let rootScore = Array.zeroCreate<float> 4
+    /// Per root direction (indexed by int Dir): TimeoutGuard if repeating it next turn is fatal, else 0
+    let rootPen = Array.zeroCreate<float> 4
 
     // Transposition table: position hash -> best move (ordering hint) and, if enabled, a score bound at some
     // remaining depth. Positions recur across iterative-deepening iterations and, via the persistent table, on the
@@ -365,7 +374,9 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
 
             while i < nm && not aborted do
                 mv[me] <- mine[i]
-                let a = max alpha best
+                // Root scores carry the timeout penalty; the subtree sees the window in its own (raw) terms
+                let pen = if ply = 0 then rootPen[int mine[i]] else 0.0
+                let a = max alpha best + pen
                 let mutable worst = Double.PositiveInfinity
                 // PVS: after the first move, only ask "does this beat a?" with a null window; re-search if it does
                 let mutable scout = pvs && depth >= 3 && i > 0 && a > Double.NegativeInfinity && a < beta
@@ -444,6 +455,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                             am[j * 4] <- m
 
                 if not aborted then
+                    worst <- worst - pen
                     if ply = 0 then rootScore[i] <- worst
 
                     if worst > best then
@@ -491,6 +503,19 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                     e.Key <- meta ^^^ data
 
             best
+
+    /// Fills rootPen: a move gets `guard` if moving the same way again next turn leaves the board. Only walls: also
+    /// penalising moves that point at a body cost 164 elo in 4-snake self-play (heading at bodies is how a snake
+    /// hugs walls of its own and cuts opponents off), and the 0.7.7 timeout deaths were all wall collisions.
+    member private _.SetRootPenalties(b: Board, mine: Dir[], nm: int) =
+        Array.Clear rootPen
+
+        if guard > 0.0 then
+            for i in 0 .. nm - 1 do
+                let d = mine[i]
+                let c = geo.Neighbor(b.Head me, d)
+
+                if c >= 0 && geo.Neighbor(c, d) < 0 then rootPen[int d] <- guard
 
     /// Searches until the Stopwatch timestamp `stopAt`. Always returns a legal move, even with no time at all.
     /// Iterative deepening from depth 1 over the root moves in myMoves[0] (nm > 1), until the deadline,
@@ -585,6 +610,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
 
         let mine = myMoves[0]
         let nm = this.Gen(boards[0], me, mine, 0)
+        this.SetRootPenalties(boards[0], mine, nm)
         let mutable result = { Move = mine[0]; Depth = 0; Score = 0.0; Nodes = 0L; Relaxed = false }
 
         if nm > 1 then

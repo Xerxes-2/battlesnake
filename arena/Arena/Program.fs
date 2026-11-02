@@ -2,11 +2,12 @@
 /// PlaceFoodFixed, standard food spawning). Game rules come from our own engine, which the tests pin to the official one.
 ///
 ///   Arena match <botA> <botB> [--mode duel|standard] [--games MAX] [--sprt elo0,elo1] [--fixed] [--par P] [--seed S]
+///     [--timeout P]  (each answer lost with probability P; the engine then repeats the bot's last move)
 ///     SPRT by default (H0 elo<=0 vs H1 elo>=20, alpha=beta=0.05), stops when decided; --fixed plays exactly --games
 ///   Arena tune  [--mode duel|standard] [--nodes N] [--iters N] [--batch B] [--from weights] [--par P]
 ///
 ///   bot:  base | search:<ms> | nodes:<n> | plain:<n> (no ordering) | hint:<n> (no score reuse)
-///         | legacy:<n> (pre-0.6.1 proofs) | relaxnear:<n> (0.7.1 re-search) | pre076:<n> (0.7.5 ordering) | ponder:<n>:<p> (p more nodes
+///         | legacy:<n> (pre-0.6.1 proofs) | relaxnear:<n> (0.7.1 re-search) | pre076:<n> (0.7.5 ordering) | guard:<n>:<g> (timeout guard g) | ponder:<n>:<p> (p more nodes
 ///         after each move) | smp:<ms>:<threads>:<diversity>   optionally followed by @<weights>
 ///   weights: "name=value,..." or a path to a file in that format (see Weights.names)
 module Snake.Arena.Program
@@ -64,6 +65,8 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
     | [| "relaxnear"; n |] -> searcher geo maxSnakes { cfg with RelaxNear = true } (nodes n)
     // nodes:<n> with 0.7.5's ordering (no refutation-first, no PVS), for A/B
     | [| "pre076"; n |] -> searcher geo maxSnakes { cfg with Refutation = false; Pvs = false } (nodes n)
+    // nodes:<n> with a given timeout guard (0 = 0.7.7), for A/B
+    | [| "guard"; n; g |] -> searcher geo maxSnakes { cfg with TimeoutGuard = float g } (nodes n)
     | [| "ponder"; n; p |] ->
         // After answering, keep searching the same position for p more nodes (the server does this while the
         // response travels and the other snakes think); the table carries it into the next turn.
@@ -153,16 +156,30 @@ let spawnFood (b: Board) (rng: Random) =
 
         if free.Length > 0 then b.SetFood(free[rng.Next free.Length], true)
 
+/// Per-move probability that a bot's answer is lost and the engine repeats its last move (match --timeout P).
+let mutable timeoutRate = 0.0
+
+/// The direction snake s last moved (Up before its first move), which the engine repeats on a timeout.
+let heading (b: Board) (s: int) =
+    let neck = b.Body(s, 1)
+
+    Dir.all
+    |> Array.tryFind (fun d -> neck <> b.Head s && b.Geometry.Neighbor(neck, d) = b.Head s)
+    |> Option.defaultValue Dir.Up
+
 /// Plays one game; returns the winning seat (-1 = draw) and the number of turns.
 let playBots (bots: Bot[]) (seed: int) =
     let rng = Random(seed)
+    let lost = Random(seed + 7919)
     let n = bots.Length
     let b = setup rng n
     let moves = Array.zeroCreate<Dir> n
 
     while b.AliveCount > 1 && b.Turn < 1000 do
         for s in 0 .. n - 1 do
-            if b.Alive s then moves[s] <- (bots[s]) b s
+            if b.Alive s then
+                moves[s] <- (bots[s]) b s
+                if timeoutRate > 0.0 && lost.NextDouble() < timeoutRate then moves[s] <- heading b s
 
         b.Step moves
         spawnFood b rng
@@ -235,6 +252,7 @@ let runMatch (argv: string[]) =
     let par = int (opt argv "--par" (string Environment.ProcessorCount))
     let seed0 = int (opt argv "--seed" "1")
     let bounds = (opt argv "--sprt" "0,20").Split(',') |> Array.map float
+    timeoutRate <- float (opt argv "--timeout" "0")
     let elo0, elo1 = bounds[0], bounds[1]
     let lower, upper = Math.Log(0.05 / 0.95), Math.Log(0.95 / 0.05)
     let stats = PairStats()
