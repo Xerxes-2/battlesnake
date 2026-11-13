@@ -7,7 +7,7 @@ for games played after 2026-11-09; the arena host serves both old and new ones.
 
 usage: ladder_report.py games.pkl [--timeouts]
 
-Each extra game costs ~1 request for meta and ~2 for --timeouts.
+Each extra game costs ~1 request for meta and ~5 (one per 100 turns) for --timeouts.
 """
 
 import collections
@@ -38,6 +38,16 @@ def get(gid, what=''):
     return d
 
 
+def all_frames(gid):
+    """All frames; the API caps a page at 100 whatever `limit` says."""
+    out = []
+    while page := (get(gid, f'/frames?offset={len(out)}&limit=100') or {}).get('Frames'):
+        out += page
+        if len(page) < 100:
+            break
+    return {'Frames': out}
+
+
 def main():
     import pickle
     games = pickle.load(open(sys.argv[1], 'rb'))
@@ -46,7 +56,7 @@ def main():
     with cf.ThreadPoolExecutor(16) as ex:
         metas = dict(zip(ids, ex.map(get, ids)))
         if timeouts:
-            frames = dict(zip(ids, ex.map(lambda g: get(g, '/frames?offset=0&limit=1000'), ids)))
+            frames = dict(zip(ids, ex.map(all_frames, ids)))
         else:
             frames = {}
 
