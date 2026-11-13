@@ -8,7 +8,8 @@ Non-ladder games are recorded as an empty marker so they are not fetched again.
 """
 import json, os, sys, urllib.request, concurrent.futures as cf
 
-API = "https://engine.battlesnake.com/games/"
+# 2026-11 改版后新对局在 arena 主机上，engine 对它们返回 404
+API = "https://arena.battlesnake.com/api/games/"
 
 def get(url):
     for _ in range(4):
@@ -24,7 +25,7 @@ def fetch(gid, out):
     if os.path.exists(path):
         return "cached"
     g = get(API + gid)
-    if g["Game"].get("Source") != "ladder":
+    if g["Game"].get("Source") not in ("ladder", "arena"):
         open(path, "w").write("{}")
         return "skip"
     last = g["LastFrame"]["Turn"]

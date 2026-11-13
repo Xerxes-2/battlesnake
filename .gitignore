@@ -491,3 +491,7 @@ result
 result-*
 tune/*.log
 tune/texel/
+
+# 本地笔记与分析缓存（含主机等私人信息）
+docs/local/
+.cache/
