@@ -25,7 +25,7 @@ ALIAS = {'self-collision': 'snake-self-collision'}
 
 
 def get(gid, what=''):
-    path = os.path.join(CACHE, gid + what + '.json')
+    path = os.path.join(CACHE, gid + what.replace('/', '_') + '.json')
     if os.path.exists(path):
         return json.load(open(path))
     try:
