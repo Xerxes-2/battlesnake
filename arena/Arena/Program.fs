@@ -7,7 +7,7 @@
 ///   Arena tune  [--mode duel|standard] [--nodes N] [--iters N] [--batch B] [--from weights] [--par P]
 ///
 ///   bot:  base | search:<ms> | nodes:<n> | plain:<n> (no ordering) | hint:<n> (no score reuse)
-///         | legacy:<n> (pre-0.6.1 proofs) | relaxnear:<n> (0.7.1 re-search) | pre076:<n> (0.7.5 ordering) | guard:<n>:<g> (timeout guard g) | ponder:<n>:<p> (p more nodes
+///         | legacy:<n> (pre-0.6.1 proofs) | relaxnear:<n> (0.7.1 re-search) | pre076:<n> (0.7.5 ordering) | guard:<n>:<g> (timeout guard g) | guard078:<n> (0.7.8 guard on proofs) | ponder:<n>:<p> (p more nodes
 ///         after each move) | smp:<ms>:<threads>:<diversity>   optionally followed by @<weights>
 ///   weights: "name=value,..." or a path to a file in that format (see Weights.names)
 module Snake.Arena.Program
@@ -67,6 +67,8 @@ let makeBotW (geo: Geometry) (maxSnakes: int) (spec: string) (w: Weights) : Bot 
     | [| "pre076"; n |] -> searcher geo maxSnakes { cfg with Refutation = false; Pvs = false } (nodes n)
     // nodes:<n> with a given timeout guard (0 = 0.7.7), for A/B
     | [| "guard"; n; g |] -> searcher geo maxSnakes { cfg with TimeoutGuard = float g } (nodes n)
+    // nodes:<n> with 0.7.8's guard that also shifts proven scores, for A/B
+    | [| "guard078"; n |] -> searcher geo maxSnakes { cfg with GuardProven = true } (nodes n)
     | [| "ponder"; n; p |] ->
         // After answering, keep searching the same position for p more nodes (the server does this while the
         // response travels and the other snakes think); the table carries it into the next turn.

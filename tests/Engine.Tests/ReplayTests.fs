@@ -51,3 +51,27 @@ let ``relaxed search with RelaxNear keeps every opponent two steps away adversar
     let cfg = { SearchConfig.make Weights.standard with RelaxNear = true }
     let r = Searcher(geo, 4, cfg).Search(b, 0, Limits.nodes 400_000L)
     Assert.NotEqual(Dir.Right, r.Move)
+
+/// Ladder games e82c20e4 (turn 17) and baffa219 (turn 33), 0.7.8: every move was a proven loss, and the timeout
+/// guard's 2 points on the edge move cancelled its 2 extra plies before dying, so the search tied it with a
+/// head-on into a longer snake and took that. 29 ladder deaths like this in 2 days. Proven scores carry no guard.
+[<Theory>]
+[<InlineData("std-guard-headon-t17.json", Dir.Left)>]
+[<InlineData("std-guard-headon-t33.json", Dir.Right)>]
+let ``the timeout guard does not trade a later loss for a head-on`` (name: string, headOn: Dir) =
+    let geo, b = load name
+    let search cfg = Searcher(geo, 4, cfg).Search(b, 0, Limits.nodes 400_000L).Move
+    let cfg = SearchConfig.make Weights.standard
+    Assert.NotEqual(headOn, search cfg)
+    Assert.Equal(headOn, search { cfg with GuardProven = true }) // the arena's guard078 bot still plays 0.7.8
+
+/// Ladder game 681b749b (turn 113), 0.7.8: Left kills the shorter opponent head-on now, but points at the wall, so
+/// the guard made "win next turn" score higher and the snake ran up beside it for 9 turns. Same cause as above.
+/// Needs the server's Lazy SMP: a single thread proves the win at depth 1 and stops; the deepest helper decides.
+[<Fact>]
+let ``the timeout guard does not postpone a proven win`` () =
+    let geo, b = load "duel-guard-stall-t113.json"
+    let search cfg = ParallelSearcher(geo, 4, cfg, 4).Search(b, 0, Limits.forMs 50.0<ms>, 3).Move
+    let cfg = SearchConfig.make Weights.duel
+    Assert.Equal(Dir.Left, search cfg)
+    Assert.Equal(Dir.Up, search { cfg with GuardProven = true })

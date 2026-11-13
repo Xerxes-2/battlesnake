@@ -45,6 +45,8 @@ type SearchConfig =
         /// heading into a wall. 0 = off. Self-play, 30k nodes, 2 vs 0: duel +7 [-11, +25], standard +2 [-13, +18]
         /// without timeouts; duel +14 [-0, +28] with 1% of answers lost. 20 cost duel -15 and standard -72.
         TimeoutGuard: float
+        /// 0.7.8's guard also shifted proven scores, tying a later loss with a head-on now; for A/B only
+        GuardProven: bool
     }
 
 module SearchConfig =
@@ -58,7 +60,8 @@ module SearchConfig =
           Diversity = 2
           Refutation = true
           Pvs = true
-          TimeoutGuard = 2.0 }
+          TimeoutGuard = 2.0
+          GuardProven = false }
 
 /// When one search stops: at the Stopwatch timestamp StopAt, after Nodes nodes (0 = no limit; node limits make
 /// self-play deterministic and independent of machine load) or after iteration Depth, whichever comes first.
@@ -115,6 +118,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
     let refutation = config.Ordering && config.Refutation
     let pvs = config.Pvs
     let guard = config.TimeoutGuard
+    let guardProven = config.GuardProven
     let territory = Territory(geo, maxSnakes)
     let boards = Array.init (maxPly + 2) (fun _ -> Board(geo, maxSnakes))
     let moves = Array.init (maxPly + 1) (fun _ -> Array.zeroCreate<Dir> maxSnakes)
@@ -374,9 +378,12 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
 
             while i < nm && not aborted do
                 mv[me] <- mine[i]
-                // Root scores carry the timeout penalty; the subtree sees the window in its own (raw) terms
+                // Root scores carry the timeout penalty; the subtree sees the window in its own (raw) terms.
+                // Proven scores do not: one point is one ply there, so the guard would trade later deaths for
+                // a head-on (0.7.8 lost 29 ladder games that way).
                 let pen = if ply = 0 then rootPen[int mine[i]] else 0.0
-                let a = max alpha best + pen
+                let a0 = max alpha best
+                let a = if guardProven || abs a0 < win / 2.0 then a0 + pen else a0
                 let mutable worst = Double.PositiveInfinity
                 // PVS: after the first move, only ask "does this beat a?" with a null window; re-search if it does
                 let mutable scout = pvs && depth >= 3 && i > 0 && a > Double.NegativeInfinity && a < beta
@@ -455,7 +462,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                             am[j * 4] <- m
 
                 if not aborted then
-                    worst <- worst - pen
+                    if guardProven || abs worst < win / 2.0 then worst <- worst - pen
                     if ply = 0 then rootScore[i] <- worst
 
                     if worst > best then
@@ -491,6 +498,7 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                         else 1uy
 
                     let data = BitConverter.DoubleToUInt64Bits(Searcher.ToTT(best, ply))
+
 
                     let meta =
                         (uint64 check <<< 32)
