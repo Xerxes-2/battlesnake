@@ -75,3 +75,17 @@ let ``the timeout guard does not postpone a proven win`` () =
     let cfg = SearchConfig.make Weights.duel
     Assert.Equal(Dir.Left, search cfg)
     Assert.Equal(Dir.Up, search { cfg with GuardProven = true })
+
+/// Ladder game ebd19d06 (turn 312, lost at 528): Lazy SMP claimed a win in 2 plies at depth 4 and stopped deepening.
+/// At depth 4 coreyja, 9 steps away, moved by Default at the root; a helper had proven, deeper and with coreyja in
+/// range, that the position it walked into was lost for it. That proof says nothing about coreyja's other moves.
+/// Timing-dependent: without the fix about 5 in 8 runs claimed the win, so 4 runs catch it 98% of the time.
+[<Fact>]
+let ``a win proven below a Default move is not a proof`` () =
+    for _ in 1..4 do
+        let ps = ParallelSearcher(Geometry(11, 11), 4, SearchConfig.make Weights.standardPrev, 4)
+
+        for t in 309..312 do
+            let _, b = load $"std-fake-win-t{t}.json"
+            let r = ps.Search(b, 0, Limits.forMs 100.0<ms>, 3)
+            Assert.True(r.Score < 500_000.0, $"turn {t}: claimed a proven win, score {r.Score} at depth {r.Depth}")

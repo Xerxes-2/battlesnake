@@ -416,7 +416,11 @@ type Searcher(geo: Geometry, maxSnakes: int, config: SearchConfig, shared: TTabl
                             elif depth = 1 then
                                 Eval.evaluate weights territory child me
                             else
-                                this.Max(ply + 1, depth - 1, a, min cap worst, 0)
+                                let r = this.Max(ply + 1, depth - 1, a, min cap worst, 0)
+                                // Same for a win proven below: a Default snake may have walked into the dead end
+                                // here. The child can prove it from the table, searched deeper with that snake in
+                                // range (ladder game ebd19d06: a fake win at depth 4 ended the deepening).
+                                if simplified && soundProofs && r > win / 2.0 then r - win + likelyWin else r
 
                         if v < worst then
                             worst <- v
