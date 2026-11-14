@@ -51,6 +51,23 @@ cand = {
     "area<2len": np.maximum(0, 2 * L - c["area"]),
     "turn": c["turn"] / 100,
 }
+if "foodMine" in c:  # dumps from 2026-11-14 on
+    cand.update({
+        "foodMine": c["foodMine"],
+        "foodMine>0": (c["foodMine"] > 0) * 1.0,
+        "foodSafe": c["foodSafe"],
+        "foodSafe>0": (c["foodSafe"] > 0) * 1.0,
+        "nfMargin": c["nfMargin"],
+        "nfGap": c["nfGap"],
+    })
+if "foodMine" in c:  # dumps from 2026-11-14 on
+    cand |= {
+        "foodMine": c["foodMine"],
+        "foodMine>0": (c["foodMine"] > 0) * 1.0,
+        "foodSafe": c["foodSafe"],
+        "nfMargin": c["nfMargin"],
+        "nfGap": np.clip(c["nfGap"], -10, 10),
+    }
 
 
 def fit(F, y, w=None, iters=25):
@@ -95,3 +112,4 @@ def screen(target, mask=None):
 screen("die10")
 screen("place")
 screen("die10", c["me"] > 0)
+screen("place", c["me"] > 0)

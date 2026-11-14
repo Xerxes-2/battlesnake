@@ -259,7 +259,11 @@ let private columns =
        "wallDist"
        "contested"
        "minArea2"
-       "soloMinusArea" |]
+       "soloMinusArea"
+       "foodMine"
+       "foodSafe"
+       "nfMargin"
+       "nfGap" |]
 
 let private dumpGame (players: int) (path: string) : float32[][] =
     use doc = JsonDocument.Parse(File.ReadAllText path)
@@ -281,8 +285,32 @@ let private dumpGame (players: int) (path: string) : float32[][] =
         let valid = if Convert.ToInt32((Path.GetFileName path).Substring(0, 2), 16) % 5 = 0 then 1f else 0f
         let cells = geo.Cells
         let vac = Array.zeroCreate<int> cells
-        let sd = Array.zeroCreate<int> cells
         let q = Array.zeroCreate<int> cells
+        let fd = Array.init players (fun _ -> Array.zeroCreate<int> cells)
+        let reach = Array.zeroCreate<int> players
+
+        // flood fill from src ignoring the other snakes' heads (bodies still vacate in time); returns cells reached
+        // including src
+        let flood (src: int) (d: int[]) =
+            Array.Fill(d, -1)
+            d[src] <- 0
+            q[0] <- src
+            let mutable qh = 0
+            let mutable qt = 1
+
+            while qh < qt do
+                let c = q[qh]
+                qh <- qh + 1
+
+                for i in 0..3 do
+                    let nb = geo.Neighbor(c, enum<Dir> i)
+
+                    if nb >= 0 && d[nb] < 0 && d[c] + 1 >= vac[nb] then
+                        d[nb] <- d[c] + 1
+                        q[qt] <- nb
+                        qt <- qt + 1
+
+            qt
         let out = ResizeArray()
 
         for f in r.GetProperty("frames").EnumerateArray() do
@@ -338,6 +366,12 @@ let private dumpGame (players: int) (path: string) : float32[][] =
 
                 let deadBefore = players - alive
 
+                for s in 0 .. alive - 1 do
+                    reach[s] <- flood (b.Head s) fd[s]
+
+                for s in 0 .. alive - 1 do
+                    reach[s] <- flood (b.Head s) fd[s]
+
                 for me in 0 .. alive - 1 do
                     let h = b.Head me
                     let myLen = b.Length me
@@ -375,24 +409,35 @@ let private dumpGame (players: int) (path: string) : float32[][] =
 
                             if t then threat <- threat + 1
 
-                    // flood fill from my head ignoring the other snakes' heads (bodies still vacate in time)
-                    Array.Fill(sd, -1)
-                    sd[h] <- 0
-                    q[0] <- h
-                    let mutable qh = 0
-                    let mutable qt = 1
+                    let sd = fd[me]
+                    let qt = reach[me]
 
-                    while qh < qt do
-                        let c = q[qh]
-                        qh <- qh + 1
+                    // food: who gets there first (flood distances, -1 = unreachable)
+                    let mutable foodMine = 0
+                    let mutable foodSafe = 0
+                    let mutable myNf = 99
+                    let mutable nfMargin = 0
+                    let mutable oppNf = 99
 
-                        for i in 0..3 do
-                            let nb = geo.Neighbor(c, enum<Dir> i)
+                    for c in 0 .. cells - 1 do
+                        if b.IsFood c then
+                            let mutable od = 99
 
-                            if nb >= 0 && sd[nb] < 0 && sd[c] + 1 >= vac[nb] then
-                                sd[nb] <- sd[c] + 1
-                                q[qt] <- nb
-                                qt <- qt + 1
+                            for s in 0 .. alive - 1 do
+                                let d = fd[s][c]
+
+                                if s <> me && d >= 0 then
+                                    od <- min od d
+                                    oppNf <- min oppNf d
+
+                            let md = if sd[c] >= 0 then sd[c] else 99
+
+                            if md < od then foodMine <- foodMine + 1
+                            if md + 2 <= od then foodSafe <- foodSafe + 1
+
+                            if md < myNf then
+                                myNf <- md
+                                nfMargin <- min 10 (od - md)
 
                     let tail = b.Body(me, myLen - 1)
                     let tailDist = if sd[tail] < 0 then 99 else sd[tail]
@@ -454,7 +499,11 @@ let private dumpGame (players: int) (path: string) : float32[][] =
                            float32 (min (min x (10 - x)) (min y (10 - y)))
                            float32 contested
                            float32 (if an.Area me = minArea then 1 else 0)
-                           float32 (qt - 1 - an.Area me) |]
+                           float32 (qt - 1 - an.Area me)
+                           float32 foodMine
+                           float32 foodSafe
+                           float32 nfMargin
+                           float32 (min myNf 20 - min oppNf 20) |]
 
         out.ToArray()
 
