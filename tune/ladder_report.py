@@ -82,9 +82,11 @@ def main():
             cause[(g['n'], ALIAS.get(death.get('Cause'), death.get('Cause')))] += 1
         elif g['n'] == 4:  # survived: placement is by length then survival
             place['alive'] += 1
-        for s in (frames.get(gid) or {}).get('Frames', []):
-            for sn in s['Snakes']:
-                if sn.get('Author') == ME and sn.get('Error'):
+        for f in (frames.get(gid) or {}).get('Frames', []):
+            for sn in f['Snakes']:
+                dead = sn.get('Death')
+                # a dead snake keeps its last Error in every later frame
+                if sn.get('Author') == ME and sn.get('Error') and not (dead and dead['Turn'] < f['Turn']):
                     late[gid[:8]] += 1
 
     print('== win rate (day, players, arm)')
@@ -99,7 +101,7 @@ def main():
         print('\n== timeouts (game, count)')
         for k, v in late.most_common(10):
             print(f'{k} {v}')
-        print('games with a timeout:', len(late), f'/ {len(ids)}')
+        print('games with a timeout:', len(late), f'/ {len(ids)}, timeouts while alive:', sum(late.values()))
 
 
 if __name__ == '__main__':

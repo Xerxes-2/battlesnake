@@ -53,6 +53,8 @@ end <id> turn=<t> <WIN/ALIVE|LOSS>
 - **长度差**：`我的长度 - 最长对手长度`，按回合采样看分布。这是 4 蛇的主要弱点指标。
 - **超时**：优先用新 arena 帧里的 `StatusCode`/`Error`（`A response was not received before the timeout`），这是唯一的第一手证据。旧数据只能靠"我们回的方向和帧里实际走的方向不一致"间接推断，会漏。
 - **超时连续性**：按局看超时时长。串行 20 多回合的超时是断网，不是网络抖动，`Clock` 的余量和 `TimeoutGuard` 都救不了。
+- **只算活着时的超时**：死掉的蛇在之后每一帧都保留最后的 `Error`，要跳过 `Death.Turn < 帧的 Turn` 的帧。
+- **网络时间**：`lat(t+1) - 本机计算(t)`，`lat` 取下一步日志行、计算取本步日志行。正常局稳定在约 162 ms；按局取中位数，能把"整局网络差"的局挑出来。和"开局时是否有别的局在跑"一起看。
 
 ## 5. 坑
 
@@ -60,4 +62,5 @@ end <id> turn=<t> <WIN/ALIVE|LOSS>
 - 天梯只跑 `standard`、11x11。`Source=ladder` 是旧引擎（MaxTurns 7200），`Source=arena` 是新平台（MaxTurns 5000），两者规则阶段一样。
 - 蛇名每局随机（`Snafe`、`Slytherin` 之类），认人要认 `Author`。
 - 对局有保存期限，老 ID 会 404，所以统计要在局后尽快做。
+- arena 每局有两个 ID，`/api/games/<id>` 返回的 `Game.ID` 可能是另一个。按请求时用的 ID（也就是我们日志里的 ID）去找缓存，不要用 `Game.ID`。
 - 一局 4 蛇的胜率天然低于 2 蛇（1/4 对 1/2 的生存概率），两列不能直接比。
